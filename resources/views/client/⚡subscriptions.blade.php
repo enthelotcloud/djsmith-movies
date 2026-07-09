@@ -13,14 +13,14 @@ use Illuminate\Support\Facades\Log;
 
 new class extends Component {
     
-    public $confirmingPlan = null;
+    // 🚨 FIX: We ONLY store the ID (a number) so Livewire never throws a 419 serialization error
+    public $confirmingPlanId = null; 
+    
     public $showResultModal = false;
     public $modalType = ''; 
     public $modalMessage = '';
     public $isProcessing = false;
-
     public $phone;
-    public $missingAmount = 0;
     public $pendingCheckouts = [];
 
     public function mount()
@@ -35,15 +35,22 @@ new class extends Component {
     }
 
     #[Computed]
-    public function plans() { return DB::table('plans')->where('is_active', true)->orderBy('price')->get(); }
+    public function plans() { return Plan::where('is_active', true)->orderBy('price')->get(); }
 
     #[Computed]
     public function currentBalance() { return DB::table('users')->where('id', Auth::id())->value('wallet_balance'); }
 
+    // FETCH CONFIRMING PLAN DYNAMICALLY (Safe for Livewire)
+    #[Computed]
+    public function confirmingPlan()
+    {
+        return $this->confirmingPlanId ? Plan::find($this->confirmingPlanId) : null;
+    }
+
     #[Computed]
     public function activeSubscription()
     {
-        return \App\Models\Subscription::with('plan')
+        return Subscription::with('plan')
             ->where('user_id', Auth::id())
             ->where('status', 'active')
             ->whereNotNull('expires_at')
@@ -53,21 +60,17 @@ new class extends Component {
     }
 
     #[Computed]
-    public function subscriptionHistory()
+    public function purchaseLedger()
     {
-        return \App\Models\Subscription::with('plan')
-            ->where('user_id', Auth::id())
-            ->whereNotNull('plan_id')
+        return PlanPurchase::where('user_id', Auth::id())
             ->orderBy('created_at', 'desc')
-            ->take(15)
+            ->take(20)
             ->get();
     }
 
     public function confirmPurchase($planId)
     {
-        $this->confirmingPlan = DB::table('plans')->where('id', $planId)->first();
-        $currentWallet = DB::table('users')->where('id', Auth::id())->value('wallet_balance');
-        $this->missingAmount = max(0, $this->confirmingPlan->price - $currentWallet);
+        $this->confirmingPlanId = $planId; // Storing just the integer!
     }
 
     public function executeWalletPurchase()
@@ -78,7 +81,6 @@ new class extends Component {
 
         try {
             DB::transaction(function () use ($userId, $plan) {
-                // Lock row to prevent double spending
                 $currentWallet = DB::table('users')->where('id', $userId)->lockForUpdate()->value('wallet_balance');
 
                 if ($currentWallet < $plan->price) {
@@ -91,7 +93,7 @@ new class extends Component {
                 // 2. DEACTIVATE OLD PLANS
                 DB::table('subscriptions')->where('user_id', $userId)->where('status', 'active')->update(['status' => 'inactive']);
 
-                // 3. INSERT NEW PLAN & LEDGER ENTRY
+                // 3. GRANT ACCESS
                 DB::table('subscriptions')->insert([
                     'user_id' => $userId,
                     'plan_id' => $plan->id,
@@ -103,9 +105,19 @@ new class extends Component {
                     'created_at' => now(),
                     'updated_at' => now(),
                 ]);
+
+                // 4. 🚨 WRITE PERMANENT RECEIPT TO LEDGER
+                DB::table('plan_purchases')->insert([
+                    'user_id' => $userId,
+                    'plan_name' => $plan->name,
+                    'amount_paid' => $plan->price,
+                    'duration_minutes' => $plan->duration_minutes,
+                    'expires_at' => now()->addMinutes($plan->duration_minutes),
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
             });
 
-            // Transaction successful! Show modal.
             $this->modalType = 'success';
             $this->modalMessage = 'Success! Deducted KES ' . number_format($plan->price, 0) . ' from your wallet for ' . $plan->name . '.';
             $this->showResultModal = true;
@@ -117,28 +129,29 @@ new class extends Component {
             $this->showResultModal = true;
         }
 
-        // Hide confirmation modal and reset processing state
-        $this->confirmingPlan = null;
+        $this->confirmingPlanId = null;
         $this->isProcessing = false;
-        
-        // DO NOT unset computed properties here. We will force a full page reload when they close the success modal.
+        unset($this->currentBalance, $this->activeSubscription, $this->purchaseLedger);
     }
 
     public function executeMpesaPurchase(MpesaService $mpesaService)
     {
         $this->validate(['phone' => ['required', 'string', 'regex:/^254[0-9]{9}$/']]);
+        
+        $plan = $this->confirmingPlan;
+        $missingAmount = max(0, $plan->price - $this->currentBalance);
         $this->isProcessing = true;
-        $reference = 'PLN' . $this->confirmingPlan->id . 'UID' . Auth::id();
-
-        $response = $mpesaService->stkPush($this->phone, $this->missingAmount, $reference);
+        
+        $reference = 'PLN' . $plan->id . 'UID' . Auth::id();
+        $response = $mpesaService->stkPush($this->phone, $missingAmount, $reference);
 
         if (isset($response['ResponseCode']) && $response['ResponseCode'] == '0') {
             DB::table('mpesa_transactions')->insert([
                 'user_id' => Auth::id(),
-                'target_plan_id' => $this->confirmingPlan->id,
+                'target_plan_id' => $plan->id,
                 'merchant_request_id' => $response['MerchantRequestID'],
                 'checkout_request_id' => $response['CheckoutRequestID'],
-                'amount' => $this->missingAmount,
+                'amount' => $missingAmount,
                 'phone' => $this->phone,
                 'status' => 'pending',
                 'created_at' => now(),
@@ -149,9 +162,9 @@ new class extends Component {
             $this->isProcessing = false;
         } else {
             $this->modalType = 'error';
-            $this->modalMessage = 'M-Pesa STK Push failed.';
+            $this->modalMessage = 'M-Pesa STK Push failed. Please try again.';
             $this->showResultModal = true;
-            $this->confirmingPlan = null;
+            $this->confirmingPlanId = null;
             $this->isProcessing = false;
         }
     }
@@ -168,28 +181,23 @@ new class extends Component {
         foreach ($updatedTx as $tx) {
             if ($tx->status === 'completed') {
                 $this->modalType = 'success';
-                $this->modalMessage = 'M-Pesa Deposit Received! Your plan is now active.';
+                $this->modalMessage = 'M-Pesa Deposit Received! Your plan was automatically purchased.';
                 $this->showResultModal = true;
             } else {
                 $this->modalType = 'error';
                 $this->modalMessage = 'Payment failed: ' . ($tx->result_desc ?? 'Cancelled by user');
                 $this->showResultModal = true;
             }
-            $this->confirmingPlan = null;
+            $this->confirmingPlanId = null;
             $this->pendingCheckouts = array_diff($this->pendingCheckouts, [$tx->checkout_request_id]);
+            unset($this->currentBalance, $this->activeSubscription, $this->purchaseLedger);
         }
     }
 
     public function closeModals()
     {
-        $this->confirmingPlan = null;
+        $this->confirmingPlanId = null;
         $this->showResultModal = false;
-    }
-
-    // THIS IS THE FIX FOR THE 419 ERROR
-    public function finishAndReload()
-    {
-        return redirect()->route('client.subscriptions'); // Replace 'client.subscriptions' with your actual route name if different
     }
 };
 ?>
@@ -213,29 +221,23 @@ new class extends Component {
         </div>
     </div>
 
-    {{-- ══════════════════ 1. ACTIVE PLAN BANNER & LIVE TIMER (WITH EMPTY STATE) ══════════════════ --}}
+    {{-- ══════════════════ 1. ACTIVE PLAN BANNER & LIVE TIMER ══════════════════ --}}
     @if($this->activeSubscription && $this->activeSubscription->plan)
         <div class="bg-gradient-to-r from-red-950 to-black border border-red-900 rounded-2xl p-8 shadow-2xl relative overflow-hidden">
             <div class="absolute top-0 right-0 w-64 h-64 bg-red-600/10 blur-3xl rounded-full pointer-events-none"></div>
-            
             <div class="relative z-10 flex flex-col md:flex-row justify-between items-center gap-6">
                 <div>
                     <h2 class="text-sm font-bold text-red-500 uppercase tracking-widest mb-1">Currently Active</h2>
                     <div class="text-4xl font-black text-white">{{ $this->activeSubscription->plan->name }}</div>
                 </div>
 
-                @php 
-                    $secondsRemaining = now()->diffInSeconds(\Carbon\Carbon::parse($this->activeSubscription->expires_at), false); 
-                @endphp
+                @php $secondsRemaining = now()->diffInSeconds(\Carbon\Carbon::parse($this->activeSubscription->expires_at), false); @endphp
 
                 <div class="bg-black/60 border border-red-500/30 rounded-xl p-5 text-center min-w-[250px]" 
                      x-data="{
                          s: {{ max(0, $secondsRemaining) }},
                          lbl: 'Loading...',
-                         init() {
-                             this.tick();
-                             setInterval(() => { this.s--; this.tick(); }, 1000);
-                         },
+                         init() { this.tick(); setInterval(() => { this.s--; this.tick(); }, 1000); },
                          tick() {
                              if (this.s <= 0) { this.lbl = 'EXPIRED'; return; }
                              let d = Math.floor(this.s / 86400);
@@ -251,24 +253,23 @@ new class extends Component {
             </div>
         </div>
     @else
-        {{-- EMPTY STATE FOR ACTIVE PLAN --}}
+        {{-- EMPTY STATE --}}
         <div class="bg-[#111111] border border-slate-800 rounded-2xl p-8 shadow-lg text-center flex flex-col items-center justify-center">
             <div class="w-12 h-12 bg-zinc-900 text-slate-500 rounded-full flex items-center justify-center mb-3">
                 <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
             </div>
             <h2 class="text-lg font-bold text-white mb-1">No Active Plan</h2>
-            <p class="text-sm text-slate-400">You currently don't have an active subscription. Select a plan below to start watching.</p>
+            <p class="text-sm text-slate-400">You currently don't have an active subscription. Select a plan below.</p>
         </div>
     @endif
 
-    {{-- ══════════════════ 2. PLAN CARDS ══════════════════ --}}
+    {{-- ══════════════════ 2. PLAN CARDS (WITH UPGRADE LOGIC) ══════════════════ --}}
     <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
         @forelse($this->plans as $plan)
-            <div class="bg-black border border-slate-800 rounded-2xl p-8 flex flex-col relative overflow-hidden transition hover:border-red-600/60 shadow-lg">
+            <div class="bg-black border border-slate-800 rounded-2xl p-8 flex flex-col relative overflow-hidden shadow-lg">
                 @if($plan->can_download)
                     <div class="absolute top-0 right-0 bg-red-600 text-xs font-bold px-3 py-1 rounded-bl-lg text-white">Downloads</div>
                 @endif
-
                 <h3 class="text-xl font-bold text-white mb-2">{{ $plan->name }}</h3>
                 <div class="text-3xl font-black text-red-600 mb-6">KES {{ number_format($plan->price, 0) }}</div>
 
@@ -280,17 +281,8 @@ new class extends Component {
                 @php
                     $hasActive = !is_null($this->activeSubscription);
                     $isCurrent = $hasActive && $this->activeSubscription->plan_id === $plan->id;
-                    
-                    if ($isCurrent) {
-                        $btnText = 'Extend Time';
-                        $btnColor = 'bg-red-900/50 text-red-500 border-red-600/50 hover:bg-red-600 hover:text-white';
-                    } elseif ($hasActive) {
-                        $btnText = 'Upgrade Plan';
-                        $btnColor = 'bg-red-600 text-white hover:bg-red-700';
-                    } else {
-                        $btnText = 'Select Plan';
-                        $btnColor = 'bg-zinc-900 text-red-500 border-red-600/30 hover:bg-red-600 hover:text-white';
-                    }
+                    $btnText = $isCurrent ? 'Extend Time' : ($hasActive ? 'Upgrade Plan' : 'Select Plan');
+                    $btnColor = $isCurrent ? 'bg-red-900/50 text-red-500 border-red-600/50 hover:bg-red-600 hover:text-white' : ($hasActive ? 'bg-red-600 text-white hover:bg-red-700' : 'bg-zinc-900 text-red-500 border-red-600/30 hover:bg-red-600 hover:text-white');
                 @endphp
 
                 <button wire:click="confirmPurchase({{ $plan->id }})" class="w-full py-3 rounded-lg border {{ $btnColor }} font-bold transition-all">
@@ -302,12 +294,9 @@ new class extends Component {
         @endforelse
     </div>
 
-    {{-- ══════════════════ 3. PLAN PURCHASE HISTORY (WITH EMPTY STATE) ══════════════════ --}}
+    {{-- ══════════════════ 3. PLAN PURCHASE HISTORY LEDGER ══════════════════ --}}
     <div class="bg-[#111111] border border-slate-800 rounded-2xl shadow-lg overflow-hidden mt-8">
-        <div class="px-6 py-5 border-b border-slate-800 bg-black">
-            <h3 class="text-lg font-bold text-white">Plan History</h3>
-        </div>
-        
+        <div class="px-6 py-5 border-b border-slate-800 bg-black"><h3 class="text-lg font-bold text-white">Plan History</h3></div>
         <div class="overflow-x-auto">
             <table class="w-full text-left text-sm text-slate-400 whitespace-nowrap">
                 <thead class="bg-zinc-900 border-b border-slate-800 uppercase text-[11px] font-semibold text-slate-500">
@@ -319,35 +308,20 @@ new class extends Component {
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-800/50">
-                    @forelse($this->subscriptionHistory as $history)
+                    @forelse($this->purchaseLedger as $history)
                         <tr class="hover:bg-zinc-900/50">
                             <td class="px-6 py-4">
                                 <div class="text-slate-300">{{ $history->created_at->format('M d, Y') }}</div>
                                 <div class="text-[11px] text-slate-500">{{ $history->created_at->format('h:i A') }}</div>
                             </td>
-                            <td class="px-6 py-4">
-                                <span class="text-slate-200 font-bold">{{ $history->plan->name ?? 'Deleted Plan' }}</span>
-                            </td>
-                            <td class="px-6 py-4 text-right font-mono text-red-400 font-bold">
-                                - KES {{ number_format($history->amount_paid, 2) }}
-                            </td>
+                            <td class="px-6 py-4"><span class="text-slate-200 font-bold">{{ $history->plan_name }}</span></td>
+                            <td class="px-6 py-4 text-right font-mono text-red-400 font-bold">- KES {{ number_format($history->amount_paid, 2) }}</td>
                             <td class="px-6 py-4 text-right">
                                 @php $sec = now()->diffInSeconds($history->expires_at, false); @endphp
-                                
-                                @if($history->status === 'active' && $sec > 0)
+                                @if($sec > 0)
                                     <div class="inline-flex items-center gap-2 bg-red-900/30 text-red-500 border border-red-700/50 px-3 py-1 rounded-md">
                                         <span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>
-                                        <span x-data="{
-                                            s: {{ $sec }},
-                                            lbl: '',
-                                            init() { this.tk(); setInterval(() => { this.s--; this.tk(); }, 1000); },
-                                            tk() {
-                                                if (this.s <= 0) { this.lbl = 'EXPIRED'; return; }
-                                                let m = Math.floor((this.s % 3600) / 60);
-                                                let sec = Math.floor(this.s % 60);
-                                                this.lbl = m+'m ' + sec+'s';
-                                            }
-                                        }" x-text="lbl" class="font-mono text-xs font-bold"></span>
+                                        <span x-data="{ s: {{ $sec }}, lbl: '', init() { this.tk(); setInterval(() => { this.s--; this.tk(); }, 1000); }, tk() { if (this.s <= 0) { this.lbl = 'EXPIRED'; return; } let m = Math.floor((this.s % 3600) / 60); let sec = Math.floor(this.s % 60); this.lbl = m+'m ' + sec+'s'; } }" x-text="lbl" class="font-mono text-xs font-bold"></span>
                                     </div>
                                 @else
                                     <span class="px-3 py-1.5 bg-slate-800 text-slate-500 rounded-md text-xs font-bold uppercase">Expired</span>
@@ -355,7 +329,6 @@ new class extends Component {
                             </td>
                         </tr>
                     @empty
-                        {{-- EMPTY STATE FOR HISTORY TABLE --}}
                         <tr>
                             <td colspan="4" class="px-6 py-12 text-center text-slate-500">
                                 <div class="flex flex-col items-center justify-center">
@@ -371,7 +344,10 @@ new class extends Component {
     </div>
 
     {{-- ══════════════════ 4. CONFIRMATION MODAL ══════════════════ --}}
-    @if($confirmingPlan)
+    @if($this->confirmingPlan)
+        @php
+            $missingAmount = max(0, $this->confirmingPlan->price - $this->currentBalance);
+        @endphp
         <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
             <div class="bg-[#111111] border border-slate-800 w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden">
                 <div class="p-6 text-center">
@@ -386,41 +362,41 @@ new class extends Component {
                         <div class="w-16 h-16 bg-red-950/50 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4 border border-red-900/50">
                             <svg class="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
                         </div>
-                        <h3 class="text-xl font-bold text-white mb-2">{{ $confirmingPlan->name }}</h3>
+                        <h3 class="text-xl font-bold text-white mb-2">{{ $this->confirmingPlan->name }}</h3>
                         
                         @if($missingAmount <= 0)
-                            <p class="text-sm text-slate-400 mb-6">Deduct <strong class="text-red-500">KES {{ number_format($confirmingPlan->price, 2) }}</strong> from your wallet?</p>
-                            <button wire:click="executeWalletPurchase" wire:loading.attr="disabled" class="w-full py-3 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold transition shadow-sm mb-3">
+                            <p class="text-sm text-slate-400 mb-6">Deduct <strong class="text-red-500">KES {{ number_format($this->confirmingPlan->price, 2) }}</strong> from your wallet?</p>
+                            <button wire:click="executeWalletPurchase" wire:loading.attr="disabled" class="w-full py-3 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold transition mb-3">
                                 <span wire:loading.remove wire:target="executeWalletPurchase">Confirm & Deduct</span>
                                 <span wire:loading wire:target="executeWalletPurchase">Processing...</span>
                             </button>
                         @else
                             <div class="bg-red-950/30 border border-red-900/50 rounded-xl p-4 mb-5 text-left">
-                                <div class="text-xs text-slate-400">Plan Cost: <span class="float-right">KES {{ number_format($confirmingPlan->price, 0) }}</span></div>
+                                <div class="text-xs text-slate-400">Plan Cost: <span class="float-right">KES {{ number_format($this->confirmingPlan->price, 0) }}</span></div>
                                 <div class="text-xs text-slate-400">Wallet: <span class="float-right text-red-400">- KES {{ number_format($this->currentBalance, 0) }}</span></div>
                                 <div class="border-t border-slate-800 my-2 pt-2 text-sm font-bold text-white">Top-up Required: <span class="float-right">KES {{ number_format($missingAmount, 0) }}</span></div>
                             </div>
                             
                             <div class="mb-4 text-left">
                                 <label class="block text-xs font-medium text-slate-400 mb-1.5">M-Pesa Number</label>
-                                <input type="text" wire:model="phone" class="w-full bg-black border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200 focus:border-red-500">
+                                <input type="text" wire:model="phone" class="w-full bg-black border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200">
                                 @error('phone') <span class="text-xs text-red-500 mt-1 block">{{ $message }}</span> @enderror
                             </div>
 
-                            <button wire:click="executeMpesaPurchase" wire:loading.attr="disabled" class="w-full py-3 rounded-lg bg-[#25D366] hover:bg-[#20b858] text-black font-bold transition shadow-sm mb-3">
+                            <button wire:click="executeMpesaPurchase" wire:loading.attr="disabled" class="w-full py-3 rounded-lg bg-[#25D366] hover:bg-[#20b858] text-black font-bold mb-3">
                                 <span wire:loading.remove wire:target="executeMpesaPurchase">Top-Up KES {{ number_format($missingAmount, 0) }} via M-Pesa</span>
                                 <span wire:loading wire:target="executeMpesaPurchase">Pushing...</span>
                             </button>
                         @endif
                         
-                        <button wire:click="closeModals" wire:loading.attr="disabled" class="w-full py-3 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-slate-800 text-slate-300 font-medium transition disabled:opacity-50">Cancel</button>
+                        <button wire:click="closeModals" wire:loading.attr="disabled" class="w-full py-3 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-slate-800 text-slate-300 font-medium">Cancel</button>
                     @endif
                 </div>
             </div>
         </div>
     @endif
 
-    {{-- ══════════════════ 5. RESULT MODAL (WITH FORCE RELOAD) ══════════════════ --}}
+    {{-- ══════════════════ 5. RESULT MODAL ══════════════════ --}}
     @if($showResultModal)
         <div class="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
             <div class="bg-[#111111] border border-slate-800 w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden">
@@ -434,16 +410,10 @@ new class extends Component {
                         <div class="w-16 h-16 bg-red-950/50 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4 border border-red-900/50">
                             <svg class="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
                         </div>
-                        <h3 class="text-xl font-bold text-white mb-2">Error</h3>
+                        <h3 class="text-xl font-bold text-white mb-2">Notice</h3>
                     @endif
                     <p class="text-sm text-slate-400 mb-6 leading-relaxed">{{ $modalMessage }}</p>
-                    
-                    {{-- 🚨 THIS IS THE CRITICAL FIX FOR THE 419 ERROR --}}
-                    @if($modalType === 'success')
-                        <button wire:click="finishAndReload" class="w-full py-3 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold transition">View My Plan</button>
-                    @else
-                        <button wire:click="closeModals" class="w-full py-3 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-slate-800 text-slate-300 font-medium transition">Close</button>
-                    @endif
+                    <button wire:click="closeModals" class="w-full py-3 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-slate-800 text-slate-300 font-medium">Close</button>
                 </div>
             </div>
         </div>
