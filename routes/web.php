@@ -13,4 +13,13 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::view('dashboard', 'dashboard')->name('dashboard');
 });
 
+Route::prefix('admin')
+    ->name('admin.')
+    ->middleware(['auth', 'admin'])
+    ->group(function () {
+
+    Route::livewire('/users', 'admin::user-manager')->name('users');
+});
+
+
 require __DIR__.'/settings.php';

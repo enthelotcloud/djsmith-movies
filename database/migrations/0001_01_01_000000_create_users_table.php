@@ -15,6 +15,16 @@ return new class extends Migration
             $table->id();
             $table->string('name');
             $table->string('email')->unique();
+            $table->string('role')->default('client'); // admin, staff, client
+            $table->string('phone')->unique()->nullable();
+            
+            // Referrals
+            $table->string('referral_code')->unique()->nullable();
+            $table->foreignId('referred_by')->nullable()->constrained('users')->onDelete('set null');
+            
+            // Wallet for auto-renewals or manual funding
+            $table->decimal('wallet_balance', 10, 2)->default(0.00);
+            
             $table->timestamp('email_verified_at')->nullable();
             $table->string('password');
             $table->rememberToken();
