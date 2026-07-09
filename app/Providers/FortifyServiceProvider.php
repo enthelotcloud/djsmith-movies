@@ -10,6 +10,8 @@ use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
 use Laravel\Fortify\Fortify;
+use Laravel\Fortify\Contracts\LoginResponse;
+use Laravel\Fortify\Contracts\RegisterResponse;
 
 class FortifyServiceProvider extends ServiceProvider
 {
@@ -29,6 +31,7 @@ class FortifyServiceProvider extends ServiceProvider
         $this->configureActions();
         $this->configureViews();
         $this->configureRateLimiting();
+        $this->configureRedirects();
     }
 
     /**
@@ -75,6 +78,42 @@ class FortifyServiceProvider extends ServiceProvider
             return Limit::perMinute(10)->by(
                 ($credentialId ?: $request->session()->getId()).'|'.$request->ip(),
             );
+        });
+    }
+
+    /**
+     * Configure Fortify custom role-based redirects.
+     */
+    private function configureRedirects(): void
+    {
+        // Intercept Login Redirect
+        $this->app->singleton(LoginResponse::class, function () {
+            return new class implements LoginResponse {
+                public function toResponse($request)
+                {
+                    $role = auth()->user()->role;
+
+                    if ($role === 'admin') {
+                        return redirect()->route('admin.dashboard');
+                    } elseif ($role === 'staff') {
+                        return redirect()->route('staff.dashboard');
+                    }
+
+                    // Fallback for clients
+                    return redirect()->route('client.dashboard');
+                }
+            };
+        });
+
+        // Intercept Registration Redirect
+        $this->app->singleton(RegisterResponse::class, function () {
+            return new class implements RegisterResponse {
+                public function toResponse($request)
+                {
+                    // New signups are always clients
+                    return redirect()->route('client.dashboard');
+                }
+            };
         });
     }
 }

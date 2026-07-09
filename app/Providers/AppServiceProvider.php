@@ -1,7 +1,8 @@
 <?php
 
 namespace App\Providers;
-
+use App\Models\User;
+use Illuminate\Support\Facades\Gate;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Date;
 use Illuminate\Support\Facades\DB;
@@ -22,7 +23,22 @@ class AppServiceProvider extends ServiceProvider
      * Bootstrap any application services.
      */
     public function boot(): void
-    {
+    {   
+        // Define what makes an Admin
+        Gate::define('admin', function (User $user) {
+            return $user->role === 'admin';
+        });
+
+        // Define what makes a Staff member (Admins usually get staff rights too)
+        Gate::define('staff', function (User $user) {
+            return in_array($user->role, ['admin', 'staff']);
+        });
+
+        // Define what makes a Client
+        Gate::define('client', function (User $user) {
+            return $user->role === 'client';
+        });
+
         $this->configureDefaults();
     }
 

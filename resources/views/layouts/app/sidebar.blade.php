@@ -11,11 +11,39 @@
             </flux:sidebar.header>
 
             <flux:sidebar.nav>
-                <flux:sidebar.group :heading="__('Platform')" class="grid">
-                    <flux:sidebar.item icon="home" :href="route('dashboard')" :current="request()->routeIs('dashboard')" wire:navigate>
+                @php
+                    $user = auth()->user();
+                @endphp
+
+                {{-- 🛡️ ADMIN AREA --}}
+                @if($user->role === 'admin')
+                    <flux:sidebar.item icon="home" :href="route('admin.dashboard')" :current="request()->routeIs('admin.dashboard')" wire:navigate>
                         {{ __('Dashboard') }}
                     </flux:sidebar.item>
-                </flux:sidebar.group>
+
+                    <flux:sidebar.item icon="user-group" :href="route('admin.users')" :current="request()->routeIs('admin.users')" wire:navigate>
+                        {{ __('Users') }}
+                    </flux:sidebar.item>
+                @endif
+
+                {{-- 💼 STAFF AREA --}}
+                @if($user->role === 'staff')
+                    <flux:sidebar.item icon="home" :href="route('staff.dashboard')" :current="request()->routeIs('staff.dashboard')" wire:navigate>
+                        {{ __('Dashboard') }}
+                    </flux:sidebar.item>
+                    
+                @endif
+
+                {{-- 👤 CLIENT AREA --}}
+                @if($user->role === 'client')
+                    <flux:sidebar.item icon="home" :href="route('client.dashboard')" :current="request()->routeIs('client.dashboard')" wire:navigate>
+                        {{ __('Dashboard') }}
+                    </flux:sidebar.item>
+                    
+                    <flux:sidebar.item icon="credit-card" :href="route('client.wallet-topup')" :current="request()->routeIs('client.wallet-topup')" wire:navigate>
+                        {{ __('Wallet Top-up') }}
+                    </flux:sidebar.item>
+                @endif
             </flux:sidebar.nav>
 
             <flux:spacer />
