@@ -20,6 +20,7 @@ Route::prefix('admin')
 
     Route::livewire('/users', 'admin::user-manager')->name('users');
     Route::livewire('/dashboard', 'admin::dashboard')->name('dashboard');
+    Route::livewire('/plans', 'admin::plan-manager')->name('plans');
 });
 
 Route::prefix('client')
@@ -29,6 +30,7 @@ Route::prefix('client')
 
     Route::livewire('/dashboard', 'client::dashboard')->name('dashboard');
     Route::livewire('/wallet-topup', 'client::wallet-topup')->name('wallet-topup');
+    Route::livewire('/subscriptions', 'client::subscriptions')->name('subscriptions');
 });
 
 Route::prefix('staff')

@@ -12,15 +12,13 @@ class Subscription extends Model
 
     protected $fillable = [
         'user_id',
+        'plan_id',
         'status',
         'auto_renew',
         'starts_at',
         'expires_at',
     ];
 
-    /**
-     * Ensure dates and booleans are cast correctly when retrieved from the DB.
-     */
     protected function casts(): array
     {
         return [
@@ -30,11 +28,13 @@ class Subscription extends Model
         ];
     }
 
-    /**
-     * Relationship back to the User.
-     */
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    public function plan(): BelongsTo
+    {
+        return $this->belongsTo(Plan::class);
     }
 }

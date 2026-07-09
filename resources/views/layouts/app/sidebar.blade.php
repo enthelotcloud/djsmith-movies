@@ -24,6 +24,10 @@
                     <flux:sidebar.item icon="user-group" :href="route('admin.users')" :current="request()->routeIs('admin.users')" wire:navigate>
                         {{ __('Users') }}
                     </flux:sidebar.item>
+
+                    <flux:sidebar.item icon="currency-dollar" :href="route('admin.plans')" :current="request()->routeIs('admin.plans')" wire:navigate>
+                        {{ __('Plans') }}
+                    </flux:sidebar.item>
                 @endif
 
                 {{-- 💼 STAFF AREA --}}
@@ -42,6 +46,11 @@
                     
                     <flux:sidebar.item icon="credit-card" :href="route('client.wallet-topup')" :current="request()->routeIs('client.wallet-topup')" wire:navigate>
                         {{ __('Wallet Top-up') }}
+                    </flux:sidebar.item>
+
+
+                    <flux:sidebar.item icon="currency-dollar" :href="route('client.subscriptions')" :current="request()->routeIs('client.subscriptions')" wire:navigate>
+                        {{ __('Subscriptions') }}
                     </flux:sidebar.item>
                 @endif
             </flux:sidebar.nav>
