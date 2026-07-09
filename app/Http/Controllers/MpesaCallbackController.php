@@ -2,24 +2,15 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\MpesaTransaction;
-use App\Models\Plan;
-use App\Models\Subscription;
-use App\Models\PlanPurchase;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Carbon\Carbon;
 
 class MpesaCallbackController extends Controller
 {
     public function handleCallback(Request $request)
     {
         $payload = $request->all();
-        
-        // Log for your own debugging if Safaricom fails
-        Log::info('M-Pesa Callback Received:', $payload);
-
         $stkCallback = $payload['Body']['stkCallback'] ?? null;
         
         if (!$stkCallback) {
@@ -28,24 +19,20 @@ class MpesaCallbackController extends Controller
 
         $checkoutRequestId = $stkCallback['CheckoutRequestID'];
         $resultCode = $stkCallback['ResultCode'];
-        $resultDesc = $stkCallback['ResultDesc'];
 
-        // Find the pending transaction
-        $transaction = MpesaTransaction::where('checkout_request_id', $checkoutRequestId)
+        // Find the pending transaction using raw DB
+        $transaction = DB::table('mpesa_transactions')
+            ->where('checkout_request_id', $checkoutRequestId)
             ->where('status', 'pending')
             ->first();
 
-        // If not found or already processed, tell Safaricom we got it so they stop retrying
         if (!$transaction) {
-            return response()->json(['ResultCode' => 0, 'ResultDesc' => 'Transaction already processed or not found']);
+            return response()->json(['ResultCode' => 0, 'ResultDesc' => 'Processed']);
         }
 
-        // RESULT CODE 0 = SUCCESS
         if ($resultCode == 0) {
-            $callbackMetadata = $stkCallback['CallbackMetadata']['Item'] ?? [];
             $receiptNumber = null;
-
-            foreach ($callbackMetadata as $item) {
+            foreach ($stkCallback['CallbackMetadata']['Item'] ?? [] as $item) {
                 if ($item['Name'] === 'MpesaReceiptNumber') {
                     $receiptNumber = $item['Value'];
                     break;
@@ -53,66 +40,56 @@ class MpesaCallbackController extends Controller
             }
 
             // 1. Mark transaction as completed
-            $transaction->update([
+            DB::table('mpesa_transactions')->where('id', $transaction->id)->update([
                 'status' => 'completed',
                 'mpesa_receipt_number' => $receiptNumber,
-                'result_desc' => $resultDesc,
+                'result_desc' => 'Success',
+                'updated_at' => now(),
             ]);
 
-            // 2. CREDIT WALLET (Strict DB query to avoid caching issues)
+            // 2. CREDIT WALLET (Raw SQL)
             DB::table('users')->where('id', $transaction->user_id)->increment('wallet_balance', $transaction->amount);
 
-            // 3. DUAL-MODE ROUTING: Did they intend to buy a plan?
+            // 3. AUTO-PURCHASE PLAN IF REQUESTED
             if ($transaction->target_plan_id) {
-                $plan = Plan::find($transaction->target_plan_id);
-                
-                // Fetch the fresh wallet balance securely
+                $plan = DB::table('plans')->where('id', $transaction->target_plan_id)->first();
                 $currentWallet = DB::table('users')->where('id', $transaction->user_id)->value('wallet_balance');
 
                 if ($plan && $currentWallet >= $plan->price) {
                     
-                    // A. Deduct the wallet
+                    // A. Deduct Wallet
                     DB::table('users')->where('id', $transaction->user_id)->decrement('wallet_balance', $plan->price);
 
-                    // B. Deactivate old subscriptions
-                    Subscription::where('user_id', $transaction->user_id)
+                    // B. Deactivate Old Plans
+                    DB::table('subscriptions')
+                        ->where('user_id', $transaction->user_id)
                         ->where('status', 'active')
-                        ->update(['status' => 'inactive']);
+                        ->update(['status' => 'inactive', 'updated_at' => now()]);
 
-                    // C. Grant Movie Access
-                    Subscription::create([
+                    // C. Force Insert New Plan & Ledger History (Bypasses Model Rules)
+                    DB::table('subscriptions')->insert([
                         'user_id' => $transaction->user_id,
                         'plan_id' => $plan->id,
                         'amount_paid' => $plan->price,
                         'status' => 'active',
-                        'starts_at' => Carbon::now(),
-                        'expires_at' => Carbon::now()->addMinutes($plan->duration_minutes),
-                        'auto_renew' => true,
-                    ]);
-
-                    // D. Write to the Permanent Plan History Ledger
-                    PlanPurchase::create([
-                        'user_id' => $transaction->user_id,
-                        'plan_name' => $plan->name,
-                        'amount_paid' => $plan->price,
-                        'duration_minutes' => $plan->duration_minutes,
-                        'expires_at' => Carbon::now()->addMinutes($plan->duration_minutes),
+                        'starts_at' => now(),
+                        'expires_at' => now()->addMinutes($plan->duration_minutes),
+                        'auto_renew' => 1,
+                        'created_at' => now(),
+                        'updated_at' => now(),
                     ]);
                 }
             }
 
         } else {
-            // RESULT CODE != 0 (FAILED, CANCELLED, TIMEOUT)
-            $transaction->update([
+            // Failed M-Pesa transaction
+            DB::table('mpesa_transactions')->where('id', $transaction->id)->update([
                 'status' => 'failed',
-                'result_desc' => $resultDesc,
+                'result_desc' => $stkCallback['ResultDesc'],
+                'updated_at' => now(),
             ]);
         }
 
-        // Safaricom strictly requires this exact JSON format to acknowledge receipt
-        return response()->json([
-            'ResultCode' => 0, 
-            'ResultDesc' => 'Accepted'
-        ]);
+        return response()->json(['ResultCode' => 0, 'ResultDesc' => 'Accepted']);
     }
 }

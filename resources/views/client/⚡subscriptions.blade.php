@@ -2,14 +2,9 @@
 
 use Livewire\Component;
 use Livewire\Attributes\Computed;
-use App\Models\Plan;
-use App\Models\Subscription;
-use App\Models\PlanPurchase;
-use App\Models\MpesaTransaction;
-use App\Services\MpesaService;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Log;
+use App\Services\MpesaService;
 
 new class extends Component {
     
@@ -26,7 +21,8 @@ new class extends Component {
     public function mount()
     {
         $this->phone = Auth::user()->phone;
-        $this->pendingCheckouts = MpesaTransaction::where('user_id', Auth::id())
+        $this->pendingCheckouts = DB::table('mpesa_transactions')
+            ->where('user_id', Auth::id())
             ->where('status', 'pending')
             ->whereNotNull('target_plan_id')
             ->pluck('checkout_request_id')
@@ -34,7 +30,7 @@ new class extends Component {
     }
 
     #[Computed]
-    public function plans() { return Plan::where('is_active', true)->orderBy('price')->get(); }
+    public function plans() { return DB::table('plans')->where('is_active', true)->orderBy('price')->get(); }
 
     #[Computed]
     public function currentBalance() { return DB::table('users')->where('id', Auth::id())->value('wallet_balance'); }
@@ -42,25 +38,29 @@ new class extends Component {
     #[Computed]
     public function activeSubscription()
     {
-        return Subscription::with('plan')
+        return \App\Models\Subscription::with('plan')
             ->where('user_id', Auth::id())
             ->where('status', 'active')
             ->whereNotNull('expires_at')
             ->where('expires_at', '>', now())
+            ->latest()
             ->first();
     }
 
     #[Computed]
-    public function purchaseLedger()
+    public function subscriptionHistory()
     {
-        return PlanPurchase::where('user_id', Auth::id())
+        return \App\Models\Subscription::with('plan')
+            ->where('user_id', Auth::id())
+            ->whereNotNull('plan_id')
             ->orderBy('created_at', 'desc')
+            ->take(15)
             ->get();
     }
 
     public function confirmPurchase($planId)
     {
-        $this->confirmingPlan = Plan::find($planId);
+        $this->confirmingPlan = DB::table('plans')->where('id', $planId)->first();
         $currentWallet = DB::table('users')->where('id', Auth::id())->value('wallet_balance');
         $this->missingAmount = max(0, $this->confirmingPlan->price - $currentWallet);
     }
@@ -73,34 +73,25 @@ new class extends Component {
 
         try {
             DB::transaction(function () use ($userId, $plan) {
-                // 1. Lock row and check balance securely
                 $currentWallet = DB::table('users')->where('id', $userId)->lockForUpdate()->value('wallet_balance');
 
                 if ($currentWallet < $plan->price) {
                     throw new \Exception('Insufficient funds.');
                 }
 
-                // 2. 🚨 DIRECT DB DECREMENT (This guarantees the money leaves the wallet instantly)
                 DB::table('users')->where('id', $userId)->decrement('wallet_balance', $plan->price);
+                DB::table('subscriptions')->where('user_id', $userId)->where('status', 'active')->update(['status' => 'inactive']);
 
-                // 3. Grant Access
-                Subscription::updateOrCreate(
-                    ['user_id' => $userId],
-                    [
-                        'plan_id' => $plan->id,
-                        'status' => 'active',
-                        'starts_at' => now(),
-                        'expires_at' => now()->addMinutes($plan->duration_minutes),
-                    ]
-                );
-
-                // 4. Write the Permanent Receipt
-                PlanPurchase::create([
+                DB::table('subscriptions')->insert([
                     'user_id' => $userId,
-                    'plan_name' => $plan->name,
+                    'plan_id' => $plan->id,
                     'amount_paid' => $plan->price,
-                    'duration_minutes' => $plan->duration_minutes,
+                    'status' => 'active',
+                    'starts_at' => now(),
                     'expires_at' => now()->addMinutes($plan->duration_minutes),
+                    'auto_renew' => 1,
+                    'created_at' => now(),
+                    'updated_at' => now(),
                 ]);
             });
 
@@ -109,7 +100,6 @@ new class extends Component {
             $this->showResultModal = true;
 
         } catch (\Exception $e) {
-            Log::error('Wallet Purchase Error: ' . $e->getMessage());
             $this->modalType = 'error';
             $this->modalMessage = 'Transaction Failed: ' . $e->getMessage();
             $this->showResultModal = true;
@@ -117,7 +107,7 @@ new class extends Component {
 
         $this->confirmingPlan = null;
         $this->isProcessing = false;
-        unset($this->activeSubscription, $this->purchaseLedger, $this->currentBalance);
+        unset($this->activeSubscription, $this->subscriptionHistory, $this->currentBalance);
     }
 
     public function executeMpesaPurchase(MpesaService $mpesaService)
@@ -129,7 +119,7 @@ new class extends Component {
         $response = $mpesaService->stkPush($this->phone, $this->missingAmount, $reference);
 
         if (isset($response['ResponseCode']) && $response['ResponseCode'] == '0') {
-            MpesaTransaction::create([
+            DB::table('mpesa_transactions')->insert([
                 'user_id' => Auth::id(),
                 'target_plan_id' => $this->confirmingPlan->id,
                 'merchant_request_id' => $response['MerchantRequestID'],
@@ -137,13 +127,15 @@ new class extends Component {
                 'amount' => $this->missingAmount,
                 'phone' => $this->phone,
                 'status' => 'pending',
+                'created_at' => now(),
+                'updated_at' => now(),
             ]);
 
             $this->pendingCheckouts[] = $response['CheckoutRequestID'];
             $this->isProcessing = false;
         } else {
             $this->modalType = 'error';
-            $this->modalMessage = 'M-Pesa STK Push failed. Please try again.';
+            $this->modalMessage = 'M-Pesa STK Push failed.';
             $this->showResultModal = true;
             $this->confirmingPlan = null;
             $this->isProcessing = false;
@@ -154,23 +146,24 @@ new class extends Component {
     {
         if (empty($this->pendingCheckouts)) return;
 
-        $updatedTx = MpesaTransaction::whereIn('checkout_request_id', $this->pendingCheckouts)
-            ->whereIn('status', ['completed', 'failed'])->get();
+        $updatedTx = DB::table('mpesa_transactions')
+            ->whereIn('checkout_request_id', $this->pendingCheckouts)
+            ->whereIn('status', ['completed', 'failed'])
+            ->get();
 
         foreach ($updatedTx as $tx) {
             if ($tx->status === 'completed') {
                 $this->modalType = 'success';
-                $this->modalMessage = 'M-Pesa Deposit Received! Your plan was automatically purchased.';
+                $this->modalMessage = 'M-Pesa Deposit Received! Your plan is now active.';
                 $this->showResultModal = true;
-                $this->confirmingPlan = null;
-                unset($this->activeSubscription, $this->purchaseLedger, $this->currentBalance);
             } else {
                 $this->modalType = 'error';
                 $this->modalMessage = 'Payment failed: ' . ($tx->result_desc ?? 'Cancelled by user');
                 $this->showResultModal = true;
-                $this->confirmingPlan = null;
             }
+            $this->confirmingPlan = null;
             $this->pendingCheckouts = array_diff($this->pendingCheckouts, [$tx->checkout_request_id]);
+            unset($this->activeSubscription, $this->subscriptionHistory, $this->currentBalance);
         }
     }
 
@@ -201,7 +194,7 @@ new class extends Component {
         </div>
     </div>
 
-    {{-- ══════════════════ 1. ACTIVE PLAN BANNER & LIVE TIMER ══════════════════ --}}
+    {{-- ══════════════════ 1. ACTIVE PLAN BANNER & LIVE TIMER (WITH EMPTY STATE) ══════════════════ --}}
     @if($this->activeSubscription && $this->activeSubscription->plan)
         <div class="bg-gradient-to-r from-red-950 to-black border border-red-900 rounded-2xl p-8 shadow-2xl relative overflow-hidden">
             <div class="absolute top-0 right-0 w-64 h-64 bg-red-600/10 blur-3xl rounded-full pointer-events-none"></div>
@@ -238,9 +231,18 @@ new class extends Component {
                 </div>
             </div>
         </div>
+    @else
+        {{-- EMPTY STATE FOR ACTIVE PLAN --}}
+        <div class="bg-[#111111] border border-slate-800 rounded-2xl p-8 shadow-lg text-center flex flex-col items-center justify-center">
+            <div class="w-12 h-12 bg-zinc-900 text-slate-500 rounded-full flex items-center justify-center mb-3">
+                <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+            </div>
+            <h2 class="text-lg font-bold text-white mb-1">No Active Plan</h2>
+            <p class="text-sm text-slate-400">You currently don't have an active subscription. Select a plan below to start watching.</p>
+        </div>
     @endif
 
-    {{-- ══════════════════ 2. PLAN CARDS (WITH "UPGRADE" LOGIC) ══════════════════ --}}
+    {{-- ══════════════════ 2. PLAN CARDS ══════════════════ --}}
     <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
         @forelse($this->plans as $plan)
             <div class="bg-black border border-slate-800 rounded-2xl p-8 flex flex-col relative overflow-hidden transition hover:border-red-600/60 shadow-lg">
@@ -281,65 +283,73 @@ new class extends Component {
         @endforelse
     </div>
 
-    {{-- ══════════════════ 3. PLAN PURCHASE HISTORY (FROM LEDGER) ══════════════════ --}}
-    @if(count($this->purchaseLedger) > 0)
-        <div class="bg-[#111111] border border-slate-800 rounded-2xl shadow-lg overflow-hidden mt-8">
-            <div class="px-6 py-5 border-b border-slate-800 bg-black">
-                <h3 class="text-lg font-bold text-white">Plan History</h3>
-            </div>
-            
-            <div class="overflow-x-auto">
-                <table class="w-full text-left text-sm text-slate-400 whitespace-nowrap">
-                    <thead class="bg-zinc-900 border-b border-slate-800 uppercase text-[11px] font-semibold text-slate-500">
-                        <tr>
-                            <th class="px-6 py-4">Date</th>
-                            <th class="px-6 py-4">Plan Name</th>
-                            <th class="px-6 py-4 text-right">Amount Deducted</th>
-                            <th class="px-6 py-4 text-right">Status</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-800/50">
-                        @foreach($this->purchaseLedger as $history)
-                            <tr class="hover:bg-zinc-900/50">
-                                <td class="px-6 py-4">
-                                    <div class="text-slate-300">{{ $history->created_at->format('M d, Y') }}</div>
-                                    <div class="text-[11px] text-slate-500">{{ $history->created_at->format('h:i A') }}</div>
-                                </td>
-                                <td class="px-6 py-4">
-                                    <span class="text-slate-200 font-bold">{{ $history->plan_name }}</span>
-                                </td>
-                                <td class="px-6 py-4 text-right font-mono text-red-400 font-bold">
-                                    - KES {{ number_format($history->amount_paid, 2) }}
-                                </td>
-                                <td class="px-6 py-4 text-right">
-                                    @php $sec = now()->diffInSeconds($history->expires_at, false); @endphp
-                                    
-                                    @if($sec > 0)
-                                        <div class="inline-flex items-center gap-2 bg-red-900/30 text-red-500 border border-red-700/50 px-3 py-1 rounded-md">
-                                            <span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>
-                                            <span x-data="{
-                                                s: {{ $sec }},
-                                                lbl: '',
-                                                init() { this.tk(); setInterval(() => { this.s--; this.tk(); }, 1000); },
-                                                tk() {
-                                                    if (this.s <= 0) { this.lbl = 'EXPIRED'; return; }
-                                                    let m = Math.floor((this.s % 3600) / 60);
-                                                    let sec = Math.floor(this.s % 60);
-                                                    this.lbl = m+'m ' + sec+'s';
-                                                }
-                                            }" x-text="lbl" class="font-mono text-xs font-bold"></span>
-                                        </div>
-                                    @else
-                                        <span class="px-3 py-1.5 bg-slate-800 text-slate-500 rounded-md text-xs font-bold uppercase">Expired</span>
-                                    @endif
-                                </td>
-                            </tr>
-                        @endforeach
-                    </tbody>
-                </table>
-            </div>
+    {{-- ══════════════════ 3. PLAN PURCHASE HISTORY (WITH EMPTY STATE) ══════════════════ --}}
+    <div class="bg-[#111111] border border-slate-800 rounded-2xl shadow-lg overflow-hidden mt-8">
+        <div class="px-6 py-5 border-b border-slate-800 bg-black">
+            <h3 class="text-lg font-bold text-white">Plan History</h3>
         </div>
-    @endif
+        
+        <div class="overflow-x-auto">
+            <table class="w-full text-left text-sm text-slate-400 whitespace-nowrap">
+                <thead class="bg-zinc-900 border-b border-slate-800 uppercase text-[11px] font-semibold text-slate-500">
+                    <tr>
+                        <th class="px-6 py-4">Date</th>
+                        <th class="px-6 py-4">Plan Name</th>
+                        <th class="px-6 py-4 text-right">Amount Deducted</th>
+                        <th class="px-6 py-4 text-right">Status</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/50">
+                    @forelse($this->subscriptionHistory as $history)
+                        <tr class="hover:bg-zinc-900/50">
+                            <td class="px-6 py-4">
+                                <div class="text-slate-300">{{ $history->created_at->format('M d, Y') }}</div>
+                                <div class="text-[11px] text-slate-500">{{ $history->created_at->format('h:i A') }}</div>
+                            </td>
+                            <td class="px-6 py-4">
+                                <span class="text-slate-200 font-bold">{{ $history->plan->name ?? 'Deleted Plan' }}</span>
+                            </td>
+                            <td class="px-6 py-4 text-right font-mono text-red-400 font-bold">
+                                - KES {{ number_format($history->amount_paid, 2) }}
+                            </td>
+                            <td class="px-6 py-4 text-right">
+                                @php $sec = now()->diffInSeconds($history->expires_at, false); @endphp
+                                
+                                @if($history->status === 'active' && $sec > 0)
+                                    <div class="inline-flex items-center gap-2 bg-red-900/30 text-red-500 border border-red-700/50 px-3 py-1 rounded-md">
+                                        <span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>
+                                        <span x-data="{
+                                            s: {{ $sec }},
+                                            lbl: '',
+                                            init() { this.tk(); setInterval(() => { this.s--; this.tk(); }, 1000); },
+                                            tk() {
+                                                if (this.s <= 0) { this.lbl = 'EXPIRED'; return; }
+                                                let m = Math.floor((this.s % 3600) / 60);
+                                                let sec = Math.floor(this.s % 60);
+                                                this.lbl = m+'m ' + sec+'s';
+                                            }
+                                        }" x-text="lbl" class="font-mono text-xs font-bold"></span>
+                                    </div>
+                                @else
+                                    <span class="px-3 py-1.5 bg-slate-800 text-slate-500 rounded-md text-xs font-bold uppercase">Expired</span>
+                                @endif
+                            </td>
+                        </tr>
+                    @empty
+                        {{-- EMPTY STATE FOR HISTORY TABLE --}}
+                        <tr>
+                            <td colspan="4" class="px-6 py-12 text-center text-slate-500">
+                                <div class="flex flex-col items-center justify-center">
+                                    <svg class="w-8 h-8 mb-2 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                                    No purchase history found. Your transparent ledger will appear here.
+                                </div>
+                            </td>
+                        </tr>
+                    @endforelse
+                </tbody>
+            </table>
+        </div>
+    </div>
 
     {{-- ══════════════════ 4. CONFIRMATION MODAL ══════════════════ --}}
     @if($confirmingPlan)
