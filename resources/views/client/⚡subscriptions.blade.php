@@ -2,9 +2,14 @@
 
 use Livewire\Component;
 use Livewire\Attributes\Computed;
+use App\Models\Plan;
+use App\Models\Subscription;
+use App\Models\PlanPurchase;
+use App\Models\MpesaTransaction;
+use App\Services\MpesaService;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
-use App\Services\MpesaService;
+use Illuminate\Support\Facades\Log;
 
 new class extends Component {
     
@@ -73,15 +78,20 @@ new class extends Component {
 
         try {
             DB::transaction(function () use ($userId, $plan) {
+                // Lock row to prevent double spending
                 $currentWallet = DB::table('users')->where('id', $userId)->lockForUpdate()->value('wallet_balance');
 
                 if ($currentWallet < $plan->price) {
                     throw new \Exception('Insufficient funds.');
                 }
 
+                // 1. DEDUCT WALLET
                 DB::table('users')->where('id', $userId)->decrement('wallet_balance', $plan->price);
+
+                // 2. DEACTIVATE OLD PLANS
                 DB::table('subscriptions')->where('user_id', $userId)->where('status', 'active')->update(['status' => 'inactive']);
 
+                // 3. INSERT NEW PLAN & LEDGER ENTRY
                 DB::table('subscriptions')->insert([
                     'user_id' => $userId,
                     'plan_id' => $plan->id,
@@ -95,19 +105,23 @@ new class extends Component {
                 ]);
             });
 
+            // Transaction successful! Show modal.
             $this->modalType = 'success';
             $this->modalMessage = 'Success! Deducted KES ' . number_format($plan->price, 0) . ' from your wallet for ' . $plan->name . '.';
             $this->showResultModal = true;
 
         } catch (\Exception $e) {
+            Log::error('Wallet Purchase Error: ' . $e->getMessage());
             $this->modalType = 'error';
             $this->modalMessage = 'Transaction Failed: ' . $e->getMessage();
             $this->showResultModal = true;
         }
 
+        // Hide confirmation modal and reset processing state
         $this->confirmingPlan = null;
         $this->isProcessing = false;
-        unset($this->activeSubscription, $this->subscriptionHistory, $this->currentBalance);
+        
+        // DO NOT unset computed properties here. We will force a full page reload when they close the success modal.
     }
 
     public function executeMpesaPurchase(MpesaService $mpesaService)
@@ -163,7 +177,6 @@ new class extends Component {
             }
             $this->confirmingPlan = null;
             $this->pendingCheckouts = array_diff($this->pendingCheckouts, [$tx->checkout_request_id]);
-            unset($this->activeSubscription, $this->subscriptionHistory, $this->currentBalance);
         }
     }
 
@@ -171,6 +184,12 @@ new class extends Component {
     {
         $this->confirmingPlan = null;
         $this->showResultModal = false;
+    }
+
+    // THIS IS THE FIX FOR THE 419 ERROR
+    public function finishAndReload()
+    {
+        return redirect()->route('client.subscriptions'); // Replace 'client.subscriptions' with your actual route name if different
     }
 };
 ?>
@@ -401,7 +420,7 @@ new class extends Component {
         </div>
     @endif
 
-    {{-- ══════════════════ 5. RESULT MODAL ══════════════════ --}}
+    {{-- ══════════════════ 5. RESULT MODAL (WITH FORCE RELOAD) ══════════════════ --}}
     @if($showResultModal)
         <div class="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
             <div class="bg-[#111111] border border-slate-800 w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden">
@@ -418,7 +437,13 @@ new class extends Component {
                         <h3 class="text-xl font-bold text-white mb-2">Error</h3>
                     @endif
                     <p class="text-sm text-slate-400 mb-6 leading-relaxed">{{ $modalMessage }}</p>
-                    <button wire:click="closeModals" class="w-full py-3 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-slate-800 text-slate-300 font-medium transition">Close</button>
+                    
+                    {{-- 🚨 THIS IS THE CRITICAL FIX FOR THE 419 ERROR --}}
+                    @if($modalType === 'success')
+                        <button wire:click="finishAndReload" class="w-full py-3 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold transition">View My Plan</button>
+                    @else
+                        <button wire:click="closeModals" class="w-full py-3 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-slate-800 text-slate-300 font-medium transition">Close</button>
+                    @endif
                 </div>
             </div>
         </div>
