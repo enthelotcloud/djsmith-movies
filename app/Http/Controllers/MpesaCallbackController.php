@@ -3,8 +3,13 @@
 namespace App\Http\Controllers;
 
 use App\Models\MpesaTransaction;
+use App\Models\Plan;
+use App\Models\Subscription;
+use App\Models\PlanPurchase;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Carbon\Carbon;
 
 class MpesaCallbackController extends Controller
 {
@@ -12,29 +17,30 @@ class MpesaCallbackController extends Controller
     {
         $payload = $request->all();
         
-        // Log the raw payload for debugging purposes
+        // Log for your own debugging if Safaricom fails
         Log::info('M-Pesa Callback Received:', $payload);
 
         $stkCallback = $payload['Body']['stkCallback'] ?? null;
+        
         if (!$stkCallback) {
-            return response()->json(['message' => 'Invalid payload'], 400);
+            return response()->json(['ResultCode' => 1, 'ResultDesc' => 'Invalid payload'], 400);
         }
 
         $checkoutRequestId = $stkCallback['CheckoutRequestID'];
         $resultCode = $stkCallback['ResultCode'];
         $resultDesc = $stkCallback['ResultDesc'];
 
-        // Find the pending transaction in our database
+        // Find the pending transaction
         $transaction = MpesaTransaction::where('checkout_request_id', $checkoutRequestId)
             ->where('status', 'pending')
             ->first();
 
+        // If not found or already processed, tell Safaricom we got it so they stop retrying
         if (!$transaction) {
-            return response()->json(['message' => 'Transaction not found or already processed'], 404);
+            return response()->json(['ResultCode' => 0, 'ResultDesc' => 'Transaction already processed or not found']);
         }
 
-        // Inside handleCallback(), replace the $resultCode == 0 block with this:
-
+        // RESULT CODE 0 = SUCCESS
         if ($resultCode == 0) {
             $callbackMetadata = $stkCallback['CallbackMetadata']['Item'] ?? [];
             $receiptNumber = null;
@@ -46,44 +52,67 @@ class MpesaCallbackController extends Controller
                 }
             }
 
+            // 1. Mark transaction as completed
             $transaction->update([
                 'status' => 'completed',
                 'mpesa_receipt_number' => $receiptNumber,
                 'result_desc' => $resultDesc,
             ]);
 
-            // 1. Add the money to the wallet (The Ledger stays balanced)
-            $transaction->user->increment('wallet_balance', $transaction->amount);
+            // 2. CREDIT WALLET (Strict DB query to avoid caching issues)
+            DB::table('users')->where('id', $transaction->user_id)->increment('wallet_balance', $transaction->amount);
 
-            // 2. NEW: Auto-Purchase the Plan if this was a Direct Payment!
+            // 3. DUAL-MODE ROUTING: Did they intend to buy a plan?
             if ($transaction->target_plan_id) {
-                $plan = \App\Models\Plan::find($transaction->target_plan_id);
-                $user = $transaction->user;
+                $plan = Plan::find($transaction->target_plan_id);
+                
+                // Fetch the fresh wallet balance securely
+                $currentWallet = DB::table('users')->where('id', $transaction->user_id)->value('wallet_balance');
 
-                if ($plan && $user->wallet_balance >= $plan->price) {
-                    // Deduct wallet safely
-                    $user->decrement('wallet_balance', $plan->price);
+                if ($plan && $currentWallet >= $plan->price) {
+                    
+                    // A. Deduct the wallet
+                    DB::table('users')->where('id', $transaction->user_id)->decrement('wallet_balance', $plan->price);
 
-                    // Deactivate old subscriptions
-                    \App\Models\Subscription::where('user_id', $user->id)
+                    // B. Deactivate old subscriptions
+                    Subscription::where('user_id', $transaction->user_id)
                         ->where('status', 'active')
                         ->update(['status' => 'inactive']);
 
-                    // Create new active subscription!
-                    \App\Models\Subscription::create([
-                        'user_id' => $user->id,
+                    // C. Grant Movie Access
+                    Subscription::create([
+                        'user_id' => $transaction->user_id,
                         'plan_id' => $plan->id,
-                        'amount_paid' => $plan->price, // Transparent ledger
+                        'amount_paid' => $plan->price,
                         'status' => 'active',
-                        'starts_at' => now(),
-                        'expires_at' => now()->addMinutes($plan->duration_minutes),
+                        'starts_at' => Carbon::now(),
+                        'expires_at' => Carbon::now()->addMinutes($plan->duration_minutes),
                         'auto_renew' => true,
+                    ]);
+
+                    // D. Write to the Permanent Plan History Ledger
+                    PlanPurchase::create([
+                        'user_id' => $transaction->user_id,
+                        'plan_name' => $plan->name,
+                        'amount_paid' => $plan->price,
+                        'duration_minutes' => $plan->duration_minutes,
+                        'expires_at' => Carbon::now()->addMinutes($plan->duration_minutes),
                     ]);
                 }
             }
+
+        } else {
+            // RESULT CODE != 0 (FAILED, CANCELLED, TIMEOUT)
+            $transaction->update([
+                'status' => 'failed',
+                'result_desc' => $resultDesc,
+            ]);
         }
 
-        // Safaricom expects a success response so they stop retrying
-        return response()->json(['ResultCode' => 0, 'ResultDesc' => 'Accepted']);
+        // Safaricom strictly requires this exact JSON format to acknowledge receipt
+        return response()->json([
+            'ResultCode' => 0, 
+            'ResultDesc' => 'Accepted'
+        ]);
     }
 }

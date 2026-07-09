@@ -4,7 +4,7 @@ use Livewire\Component;
 use Livewire\Attributes\Computed;
 use App\Models\Plan;
 use App\Models\Subscription;
-use App\Models\PlanPurchase; // 🚨 WE ARE NOW USING THE DEDICATED LEDGER
+use App\Models\PlanPurchase;
 use App\Models\MpesaTransaction;
 use App\Services\MpesaService;
 use Illuminate\Support\Facades\Auth;
@@ -37,9 +37,8 @@ new class extends Component {
     public function plans() { return Plan::where('is_active', true)->orderBy('price')->get(); }
 
     #[Computed]
-    public function currentBalance() { return Auth::user()->fresh()->wallet_balance; }
+    public function currentBalance() { return DB::table('users')->where('id', Auth::id())->value('wallet_balance'); }
 
-    // 1. The Access Lock (Current State)
     #[Computed]
     public function activeSubscription()
     {
@@ -51,7 +50,6 @@ new class extends Component {
             ->first();
     }
 
-    // 2. 🚨 The Permanent Ledger (Plan Purchases)
     #[Computed]
     public function purchaseLedger()
     {
@@ -63,7 +61,7 @@ new class extends Component {
     public function confirmPurchase($planId)
     {
         $this->confirmingPlan = Plan::find($planId);
-        $currentWallet = Auth::user()->fresh()->wallet_balance;
+        $currentWallet = DB::table('users')->where('id', Auth::id())->value('wallet_balance');
         $this->missingAmount = max(0, $this->confirmingPlan->price - $currentWallet);
     }
 
@@ -75,16 +73,17 @@ new class extends Component {
 
         try {
             DB::transaction(function () use ($userId, $plan) {
-                $user = \App\Models\User::lockForUpdate()->find($userId);
+                // 1. Lock row and check balance securely
+                $currentWallet = DB::table('users')->where('id', $userId)->lockForUpdate()->value('wallet_balance');
 
-                if ($user->wallet_balance < $plan->price) {
+                if ($currentWallet < $plan->price) {
                     throw new \Exception('Insufficient funds.');
                 }
 
-                // 1. Deduct Wallet
-                $user->decrement('wallet_balance', $plan->price);
+                // 2. 🚨 DIRECT DB DECREMENT (This guarantees the money leaves the wallet instantly)
+                DB::table('users')->where('id', $userId)->decrement('wallet_balance', $plan->price);
 
-                // 2. Grant Access (Update Current State)
+                // 3. Grant Access
                 Subscription::updateOrCreate(
                     ['user_id' => $userId],
                     [
@@ -95,7 +94,7 @@ new class extends Component {
                     ]
                 );
 
-                // 3. 🚨 Write the Permanent Receipt
+                // 4. Write the Permanent Receipt
                 PlanPurchase::create([
                     'user_id' => $userId,
                     'plan_name' => $plan->name,
@@ -183,7 +182,7 @@ new class extends Component {
 };
 ?>
 
-<div class="max-w-7xl mx-auto space-y-10 relative" wire:poll.3s="checkPendingStatus">
+<div class="max-w-5xl mx-auto space-y-10 relative" wire:poll.3s="checkPendingStatus">
 
     {{-- HEADER & REACTIVE WALLET --}}
     <div class="flex flex-col md:flex-row justify-between items-center gap-4 bg-[#111111] border border-slate-800 p-6 rounded-2xl shadow-lg">
@@ -349,7 +348,6 @@ new class extends Component {
                 <div class="p-6 text-center">
                     
                     @if(count($pendingCheckouts) > 0)
-                        {{-- WAITING FOR M-PESA --}}
                         <div class="w-16 h-16 bg-amber-950/50 text-amber-500 rounded-full flex items-center justify-center mx-auto mb-4 border border-amber-900/50 animate-pulse">
                             <svg class="w-8 h-8 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
                         </div>
@@ -368,7 +366,6 @@ new class extends Component {
                                 <span wire:loading wire:target="executeWalletPurchase">Processing...</span>
                             </button>
                         @else
-                            {{-- INSUFFICIENT FUNDS -> TRIGGER M-PESA --}}
                             <div class="bg-red-950/30 border border-red-900/50 rounded-xl p-4 mb-5 text-left">
                                 <div class="text-xs text-slate-400">Plan Cost: <span class="float-right">KES {{ number_format($confirmingPlan->price, 0) }}</span></div>
                                 <div class="text-xs text-slate-400">Wallet: <span class="float-right text-red-400">- KES {{ number_format($this->currentBalance, 0) }}</span></div>
