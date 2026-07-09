@@ -2,25 +2,22 @@
 
 use Livewire\Component;
 use Livewire\Attributes\Computed;
-use App\Models\Plan;
-use App\Models\Subscription;
-use App\Models\PlanPurchase;
-use App\Models\MpesaTransaction;
-use App\Services\MpesaService;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Log;
+use App\Services\MpesaService;
 
 new class extends Component {
     
-    // 🚨 FIX: We ONLY store the ID (a number) so Livewire never throws a 419 serialization error
+    // 🚨 419 FIX: Only store the ID, never the object
     public $confirmingPlanId = null; 
     
     public $showResultModal = false;
     public $modalType = ''; 
     public $modalMessage = '';
     public $isProcessing = false;
+
     public $phone;
+    public $missingAmount = 0;
     public $pendingCheckouts = [];
 
     public function mount()
@@ -35,22 +32,22 @@ new class extends Component {
     }
 
     #[Computed]
-    public function plans() { return Plan::where('is_active', true)->orderBy('price')->get(); }
+    public function plans() { return DB::table('plans')->where('is_active', true)->orderBy('price')->get(); }
 
     #[Computed]
     public function currentBalance() { return DB::table('users')->where('id', Auth::id())->value('wallet_balance'); }
 
-    // FETCH CONFIRMING PLAN DYNAMICALLY (Safe for Livewire)
+    // DYNAMICALLY FETCH PLAN OBJECT FOR MODAL
     #[Computed]
-    public function confirmingPlan()
-    {
-        return $this->confirmingPlanId ? Plan::find($this->confirmingPlanId) : null;
+    public function confirmingPlan() { 
+        return $this->confirmingPlanId ? DB::table('plans')->where('id', $this->confirmingPlanId)->first() : null; 
     }
 
+    // THE ACCESS KEY
     #[Computed]
     public function activeSubscription()
     {
-        return Subscription::with('plan')
+        return \App\Models\Subscription::with('plan')
             ->where('user_id', Auth::id())
             ->where('status', 'active')
             ->whereNotNull('expires_at')
@@ -59,25 +56,29 @@ new class extends Component {
             ->first();
     }
 
+    // 🚨 THE RECEIPT LEDGER
     #[Computed]
     public function purchaseLedger()
     {
-        return PlanPurchase::where('user_id', Auth::id())
+        return \App\Models\PlanPurchase::where('user_id', Auth::id())
             ->orderBy('created_at', 'desc')
-            ->take(20)
+            ->take(15)
             ->get();
     }
 
     public function confirmPurchase($planId)
     {
-        $this->confirmingPlanId = $planId; // Storing just the integer!
+        $this->confirmingPlanId = $planId;
+        $plan = DB::table('plans')->where('id', $planId)->first();
+        $currentWallet = DB::table('users')->where('id', Auth::id())->value('wallet_balance');
+        $this->missingAmount = max(0, $plan->price - $currentWallet);
     }
 
     public function executeWalletPurchase()
     {
         $this->isProcessing = true;
         $userId = Auth::id();
-        $plan = $this->confirmingPlan;
+        $plan = $this->confirmingPlan; // Fetched safely from Computed Property
 
         try {
             DB::transaction(function () use ($userId, $plan) {
@@ -90,10 +91,10 @@ new class extends Component {
                 // 1. DEDUCT WALLET
                 DB::table('users')->where('id', $userId)->decrement('wallet_balance', $plan->price);
 
-                // 2. DEACTIVATE OLD PLANS
-                DB::table('subscriptions')->where('user_id', $userId)->where('status', 'active')->update(['status' => 'inactive']);
+                // 2. REVOKE OLD ACCESS
+                DB::table('subscriptions')->where('user_id', $userId)->where('status', 'active')->update(['status' => 'inactive', 'updated_at' => now()]);
 
-                // 3. GRANT ACCESS
+                // 3. GRANT NEW ACCESS
                 DB::table('subscriptions')->insert([
                     'user_id' => $userId,
                     'plan_id' => $plan->id,
@@ -106,7 +107,7 @@ new class extends Component {
                     'updated_at' => now(),
                 ]);
 
-                // 4. 🚨 WRITE PERMANENT RECEIPT TO LEDGER
+                // 4. WRITE RECEIPT TO LEDGER
                 DB::table('plan_purchases')->insert([
                     'user_id' => $userId,
                     'plan_name' => $plan->name,
@@ -123,35 +124,30 @@ new class extends Component {
             $this->showResultModal = true;
 
         } catch (\Exception $e) {
-            Log::error('Wallet Purchase Error: ' . $e->getMessage());
             $this->modalType = 'error';
             $this->modalMessage = 'Transaction Failed: ' . $e->getMessage();
             $this->showResultModal = true;
         }
 
-        $this->confirmingPlanId = null;
         $this->isProcessing = false;
-        unset($this->currentBalance, $this->activeSubscription, $this->purchaseLedger);
+        unset($this->activeSubscription, $this->purchaseLedger, $this->currentBalance);
     }
 
     public function executeMpesaPurchase(MpesaService $mpesaService)
     {
         $this->validate(['phone' => ['required', 'string', 'regex:/^254[0-9]{9}$/']]);
-        
-        $plan = $this->confirmingPlan;
-        $missingAmount = max(0, $plan->price - $this->currentBalance);
         $this->isProcessing = true;
-        
-        $reference = 'PLN' . $plan->id . 'UID' . Auth::id();
-        $response = $mpesaService->stkPush($this->phone, $missingAmount, $reference);
+        $reference = 'PLN' . $this->confirmingPlanId . 'UID' . Auth::id();
+
+        $response = $mpesaService->stkPush($this->phone, $this->missingAmount, $reference);
 
         if (isset($response['ResponseCode']) && $response['ResponseCode'] == '0') {
             DB::table('mpesa_transactions')->insert([
                 'user_id' => Auth::id(),
-                'target_plan_id' => $plan->id,
+                'target_plan_id' => $this->confirmingPlanId,
                 'merchant_request_id' => $response['MerchantRequestID'],
                 'checkout_request_id' => $response['CheckoutRequestID'],
-                'amount' => $missingAmount,
+                'amount' => $this->missingAmount,
                 'phone' => $this->phone,
                 'status' => 'pending',
                 'created_at' => now(),
@@ -181,16 +177,15 @@ new class extends Component {
         foreach ($updatedTx as $tx) {
             if ($tx->status === 'completed') {
                 $this->modalType = 'success';
-                $this->modalMessage = 'M-Pesa Deposit Received! Your plan was automatically purchased.';
+                $this->modalMessage = 'M-Pesa Deposit Received! Your plan is now active.';
                 $this->showResultModal = true;
             } else {
                 $this->modalType = 'error';
                 $this->modalMessage = 'Payment failed: ' . ($tx->result_desc ?? 'Cancelled by user');
                 $this->showResultModal = true;
             }
-            $this->confirmingPlanId = null;
             $this->pendingCheckouts = array_diff($this->pendingCheckouts, [$tx->checkout_request_id]);
-            unset($this->currentBalance, $this->activeSubscription, $this->purchaseLedger);
+            unset($this->activeSubscription, $this->purchaseLedger, $this->currentBalance);
         }
     }
 
@@ -221,23 +216,29 @@ new class extends Component {
         </div>
     </div>
 
-    {{-- ══════════════════ 1. ACTIVE PLAN BANNER & LIVE TIMER ══════════════════ --}}
+    {{-- ══════════════════ 1. ACTIVE PLAN BANNER & EMPTY STATE ══════════════════ --}}
     @if($this->activeSubscription && $this->activeSubscription->plan)
         <div class="bg-gradient-to-r from-red-950 to-black border border-red-900 rounded-2xl p-8 shadow-2xl relative overflow-hidden">
             <div class="absolute top-0 right-0 w-64 h-64 bg-red-600/10 blur-3xl rounded-full pointer-events-none"></div>
+            
             <div class="relative z-10 flex flex-col md:flex-row justify-between items-center gap-6">
                 <div>
                     <h2 class="text-sm font-bold text-red-500 uppercase tracking-widest mb-1">Currently Active</h2>
                     <div class="text-4xl font-black text-white">{{ $this->activeSubscription->plan->name }}</div>
                 </div>
 
-                @php $secondsRemaining = now()->diffInSeconds(\Carbon\Carbon::parse($this->activeSubscription->expires_at), false); @endphp
+                @php 
+                    $secondsRemaining = now()->diffInSeconds(\Carbon\Carbon::parse($this->activeSubscription->expires_at), false); 
+                @endphp
 
                 <div class="bg-black/60 border border-red-500/30 rounded-xl p-5 text-center min-w-[250px]" 
                      x-data="{
                          s: {{ max(0, $secondsRemaining) }},
                          lbl: 'Loading...',
-                         init() { this.tick(); setInterval(() => { this.s--; this.tick(); }, 1000); },
+                         init() {
+                             this.tick();
+                             setInterval(() => { this.s--; this.tick(); }, 1000);
+                         },
                          tick() {
                              if (this.s <= 0) { this.lbl = 'EXPIRED'; return; }
                              let d = Math.floor(this.s / 86400);
@@ -253,7 +254,6 @@ new class extends Component {
             </div>
         </div>
     @else
-        {{-- EMPTY STATE --}}
         <div class="bg-[#111111] border border-slate-800 rounded-2xl p-8 shadow-lg text-center flex flex-col items-center justify-center">
             <div class="w-12 h-12 bg-zinc-900 text-slate-500 rounded-full flex items-center justify-center mb-3">
                 <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
@@ -266,10 +266,11 @@ new class extends Component {
     {{-- ══════════════════ 2. PLAN CARDS (WITH UPGRADE LOGIC) ══════════════════ --}}
     <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
         @forelse($this->plans as $plan)
-            <div class="bg-black border border-slate-800 rounded-2xl p-8 flex flex-col relative overflow-hidden shadow-lg">
+            <div class="bg-black border border-slate-800 rounded-2xl p-8 flex flex-col relative overflow-hidden transition hover:border-red-600/60 shadow-lg">
                 @if($plan->can_download)
                     <div class="absolute top-0 right-0 bg-red-600 text-xs font-bold px-3 py-1 rounded-bl-lg text-white">Downloads</div>
                 @endif
+
                 <h3 class="text-xl font-bold text-white mb-2">{{ $plan->name }}</h3>
                 <div class="text-3xl font-black text-red-600 mb-6">KES {{ number_format($plan->price, 0) }}</div>
 
@@ -281,8 +282,17 @@ new class extends Component {
                 @php
                     $hasActive = !is_null($this->activeSubscription);
                     $isCurrent = $hasActive && $this->activeSubscription->plan_id === $plan->id;
-                    $btnText = $isCurrent ? 'Extend Time' : ($hasActive ? 'Upgrade Plan' : 'Select Plan');
-                    $btnColor = $isCurrent ? 'bg-red-900/50 text-red-500 border-red-600/50 hover:bg-red-600 hover:text-white' : ($hasActive ? 'bg-red-600 text-white hover:bg-red-700' : 'bg-zinc-900 text-red-500 border-red-600/30 hover:bg-red-600 hover:text-white');
+                    
+                    if ($isCurrent) {
+                        $btnText = 'Extend Time';
+                        $btnColor = 'bg-red-900/50 text-red-500 border-red-600/50 hover:bg-red-600 hover:text-white';
+                    } elseif ($hasActive) {
+                        $btnText = 'Upgrade Plan';
+                        $btnColor = 'bg-red-600 text-white hover:bg-red-700';
+                    } else {
+                        $btnText = 'Select Plan';
+                        $btnColor = 'bg-zinc-900 text-red-500 border-red-600/30 hover:bg-red-600 hover:text-white';
+                    }
                 @endphp
 
                 <button wire:click="confirmPurchase({{ $plan->id }})" class="w-full py-3 rounded-lg border {{ $btnColor }} font-bold transition-all">
@@ -294,7 +304,7 @@ new class extends Component {
         @endforelse
     </div>
 
-    {{-- ══════════════════ 3. PLAN PURCHASE HISTORY LEDGER ══════════════════ --}}
+    {{-- ══════════════════ 3. PLAN PURCHASE HISTORY LEDGER & EMPTY STATE ══════════════════ --}}
     <div class="bg-[#111111] border border-slate-800 rounded-2xl shadow-lg overflow-hidden mt-8">
         <div class="px-6 py-5 border-b border-slate-800 bg-black"><h3 class="text-lg font-bold text-white">Plan History</h3></div>
         <div class="overflow-x-auto">
@@ -345,9 +355,6 @@ new class extends Component {
 
     {{-- ══════════════════ 4. CONFIRMATION MODAL ══════════════════ --}}
     @if($this->confirmingPlan)
-        @php
-            $missingAmount = max(0, $this->confirmingPlan->price - $this->currentBalance);
-        @endphp
         <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
             <div class="bg-[#111111] border border-slate-800 w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden">
                 <div class="p-6 text-center">
@@ -413,7 +420,13 @@ new class extends Component {
                         <h3 class="text-xl font-bold text-white mb-2">Notice</h3>
                     @endif
                     <p class="text-sm text-slate-400 mb-6 leading-relaxed">{{ $modalMessage }}</p>
-                    <button wire:click="closeModals" class="w-full py-3 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-slate-800 text-slate-300 font-medium">Close</button>
+                    
+                    {{-- 🚨 FORCE RELOAD TO CLEAR LIVEWIRE STATE ON SUCCESS --}}
+                    @if($modalType === 'success')
+                        <button onclick="window.location.reload()" class="w-full py-3 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold">Done</button>
+                    @else
+                        <button wire:click="closeModals" class="w-full py-3 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-slate-800 text-slate-300 font-medium">Close</button>
+                    @endif
                 </div>
             </div>
         </div>

@@ -12,7 +12,7 @@ class MpesaCallbackController extends Controller
     {
         $payload = $request->all();
         $stkCallback = $payload['Body']['stkCallback'] ?? null;
-        
+
         if (!$stkCallback) {
             return response()->json(['ResultCode' => 1, 'ResultDesc' => 'Invalid payload'], 400);
         }
@@ -20,7 +20,7 @@ class MpesaCallbackController extends Controller
         $checkoutRequestId = $stkCallback['CheckoutRequestID'];
         $resultCode = $stkCallback['ResultCode'];
 
-        // Find the pending transaction using raw DB
+        // Find transaction
         $transaction = DB::table('mpesa_transactions')
             ->where('checkout_request_id', $checkoutRequestId)
             ->where('status', 'pending')
@@ -39,7 +39,7 @@ class MpesaCallbackController extends Controller
                 }
             }
 
-            // 1. Mark transaction as completed
+            // 1. Mark transaction completed
             DB::table('mpesa_transactions')->where('id', $transaction->id)->update([
                 'status' => 'completed',
                 'mpesa_receipt_number' => $receiptNumber,
@@ -47,26 +47,26 @@ class MpesaCallbackController extends Controller
                 'updated_at' => now(),
             ]);
 
-            // 2. CREDIT WALLET (Raw SQL)
+            // 2. CREDIT WALLET
             DB::table('users')->where('id', $transaction->user_id)->increment('wallet_balance', $transaction->amount);
 
-            // 3. AUTO-PURCHASE PLAN IF REQUESTED
+            // 3. THE CROSSOVER: Auto-Buy Plan if requested
             if ($transaction->target_plan_id) {
                 $plan = DB::table('plans')->where('id', $transaction->target_plan_id)->first();
                 $currentWallet = DB::table('users')->where('id', $transaction->user_id)->value('wallet_balance');
 
                 if ($plan && $currentWallet >= $plan->price) {
-                    
+
                     // A. Deduct Wallet
                     DB::table('users')->where('id', $transaction->user_id)->decrement('wallet_balance', $plan->price);
 
-                    // B. Deactivate Old Plans
+                    // B. Revoke Old Access
                     DB::table('subscriptions')
                         ->where('user_id', $transaction->user_id)
                         ->where('status', 'active')
                         ->update(['status' => 'inactive', 'updated_at' => now()]);
 
-                    // C. Force Insert New Plan & Ledger History (Bypasses Model Rules)
+                    // C. Grant New Access (The Key)
                     DB::table('subscriptions')->insert([
                         'user_id' => $transaction->user_id,
                         'plan_id' => $plan->id,
@@ -75,6 +75,17 @@ class MpesaCallbackController extends Controller
                         'starts_at' => now(),
                         'expires_at' => now()->addMinutes($plan->duration_minutes),
                         'auto_renew' => 1,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+
+                    // D. 🚨 WRITE TO TRANSPARENT LEDGER (The Receipt)
+                    DB::table('plan_purchases')->insert([
+                        'user_id' => $transaction->user_id,
+                        'plan_name' => $plan->name,
+                        'amount_paid' => $plan->price,
+                        'duration_minutes' => $plan->duration_minutes,
+                        'expires_at' => now()->addMinutes($plan->duration_minutes),
                         'created_at' => now(),
                         'updated_at' => now(),
                     ]);
