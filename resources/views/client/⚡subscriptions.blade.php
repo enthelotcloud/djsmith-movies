@@ -4,15 +4,15 @@ use Livewire\Component;
 use Livewire\Attributes\Computed;
 use App\Models\Plan;
 use App\Models\Subscription;
+use App\Models\User;
 use Illuminate\Support\Facades\Auth;
 use Carbon\Carbon;
 
 new class extends Component {
     
-    // Modal States
     public $confirmingPlan = null;
     public $showResultModal = false;
-    public $modalType = ''; // 'success' or 'error'
+    public $modalType = ''; 
     public $modalMessage = '';
     public $isProcessing = false;
 
@@ -22,11 +22,33 @@ new class extends Component {
         return Plan::where('is_active', true)->orderBy('price')->get();
     }
 
-    // 1. Reactive Wallet Balance
     #[Computed]
     public function currentBalance()
     {
         return Auth::user()->fresh()->wallet_balance;
+    }
+
+    #[Computed]
+    public function activeSubscription()
+    {
+        return Subscription::with('plan')
+            ->where('user_id', Auth::id())
+            ->where('status', 'active')
+            ->whereNotNull('expires_at')
+            ->where('expires_at', '>', now())
+            ->first();
+    }
+
+    #[Computed]
+    public function subscriptionHistory()
+    {
+        // FIX: Only fetch real purchases by ignoring the default inactive placeholder
+        return Subscription::with('plan')
+            ->where('user_id', Auth::id())
+            ->whereNotNull('plan_id') 
+            ->orderBy('created_at', 'desc')
+            ->take(5)
+            ->get();
     }
 
     public function confirmPurchase($planId)
@@ -37,11 +59,11 @@ new class extends Component {
     public function executePurchase()
     {
         $this->isProcessing = true;
-        $user = Auth::user();
+        
+        $user = User::find(Auth::id()); 
         $plan = $this->confirmingPlan;
 
-        // Check funds
-        if ($user->fresh()->wallet_balance < $plan->price) {
+        if ($user->wallet_balance < $plan->price) {
             $this->modalType = 'error';
             $this->modalMessage = 'Insufficient funds. You need KES ' . number_format($plan->price - $user->wallet_balance, 2) . ' more. Please top up your wallet.';
             $this->showResultModal = true;
@@ -50,8 +72,9 @@ new class extends Component {
             return;
         }
 
-        // Deduct money
-        $user->decrement('wallet_balance', $plan->price);
+        // Deduct money safely
+        $user->wallet_balance -= $plan->price;
+        $user->save();
 
         // Deactivate old subscriptions
         Subscription::where('user_id', $user->id)
@@ -68,9 +91,8 @@ new class extends Component {
             'auto_renew' => true, 
         ]);
 
-        // Show Success Modal
         $this->modalType = 'success';
-        $this->modalMessage = 'Success! You are now subscribed to ' . $plan->name . '. Grab the popcorn!';
+        $this->modalMessage = 'Success! You are now subscribed to ' . $plan->name . '. Enjoy your movies!';
         $this->showResultModal = true;
         
         $this->confirmingPlan = null;
@@ -85,20 +107,89 @@ new class extends Component {
 };
 ?>
 
-<div class="max-w-5xl mx-auto space-y-8 relative">
+<div class="max-w-5xl mx-auto space-y-10 relative">
 
-    {{-- HEADER (Reactive Balance) --}}
-    <div class="text-center mb-10">
-        <h1 class="text-3xl font-black text-white">Choose Your Plan</h1>
-        <p class="text-slate-400 mt-2 flex items-center justify-center gap-2">
-            Available Wallet Balance: 
-            <span class="text-red-500 font-mono font-bold bg-red-950/40 px-3 py-1 rounded-lg border border-red-500/30 transition-all duration-500">
-                KES {{ number_format($this->currentBalance, 2) }}
-            </span>
-        </p>
+    {{-- HEADER & REACTIVE WALLET --}}
+    <div class="flex flex-col md:flex-row justify-between items-center gap-4 bg-zinc-950 border border-slate-800 p-6 rounded-2xl shadow-lg">
+        <div>
+            <h1 class="text-3xl font-black text-white">Movie Plans</h1>
+            <p class="text-slate-400 mt-1">Upgrade your access instantly using your wallet.</p>
+        </div>
+        <div class="flex items-center gap-3 bg-black px-5 py-3 rounded-xl border border-red-900/50">
+            <div class="w-10 h-10 rounded-full bg-red-950/50 flex items-center justify-center text-red-500">
+                <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            </div>
+            <div>
+                <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Wallet Balance</div>
+                <div class="text-xl font-black text-red-500 font-mono">KES {{ number_format($this->currentBalance, 2) }}</div>
+            </div>
+        </div>
     </div>
 
-    {{-- PLAN CARDS (Netflix Red Theme) --}}
+    {{-- ══════════════════ ACTIVE PLAN & SECURE SERVER COUNTDOWN ══════════════════ --}}
+    @if($this->activeSubscription && $this->activeSubscription->plan)
+        <div class="bg-gradient-to-r from-red-950/80 to-black border border-red-900/50 rounded-2xl p-8 shadow-2xl relative overflow-hidden">
+            
+            <div class="absolute -top-24 -right-24 w-64 h-64 bg-red-600/20 blur-3xl rounded-full pointer-events-none"></div>
+
+            <div class="relative z-10 flex flex-col md:flex-row justify-between items-center gap-6">
+                <div>
+                    <h2 class="text-sm font-bold text-red-500 uppercase tracking-widest mb-1">Current Active Plan</h2>
+                    <div class="text-3xl font-black text-white">{{ $this->activeSubscription->plan->name }}</div>
+                    
+                    <div class="mt-4 flex items-center gap-4">
+                        @if($this->activeSubscription->plan->can_download)
+                            <span class="bg-red-600 text-white text-xs font-bold px-3 py-1.5 rounded-md flex items-center gap-1.5">
+                                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                                Offline Downloads Active
+                            </span>
+                        @endif
+                        <span class="text-sm text-slate-400">Purchased on {{ $this->activeSubscription->starts_at ? $this->activeSubscription->starts_at->format('M d, g:i A') : 'N/A' }}</span>
+                    </div>
+                </div>
+
+                {{-- FIX: Server-Side Time Evaluation. It relies on PHP seconds, ignoring client clocks --}}
+                @php
+                    $secondsRemaining = now()->diffInSeconds($this->activeSubscription->expires_at, false);
+                @endphp
+
+                <div class="bg-black/50 border border-red-500/20 rounded-xl p-5 text-center min-w-[250px] backdrop-blur-md" 
+                     x-data="{
+                         secondsLeft: {{ $secondsRemaining }},
+                         timeRemaining: 'Calculating...',
+                         init() {
+                             this.updateDisplay();
+                             setInterval(() => {
+                                 this.secondsLeft--;
+                                 this.updateDisplay();
+                             }, 1000);
+                         },
+                         updateDisplay() {
+                             if (this.secondsLeft <= 0) {
+                                 this.timeRemaining = 'EXPIRED';
+                                 return;
+                             }
+                             let d = Math.floor(this.secondsLeft / (60 * 60 * 24));
+                             let h = Math.floor((this.secondsLeft % (60 * 60 * 24)) / (60 * 60));
+                             let m = Math.floor((this.secondsLeft % (60 * 60)) / 60);
+                             let s = Math.floor(this.secondsLeft % 60);
+                             
+                             let result = '';
+                             if (d > 0) result += d + 'd ';
+                             if (h > 0 || d > 0) result += h + 'h ';
+                             result += m + 'm ' + s + 's';
+                             
+                             this.timeRemaining = result;
+                         }
+                     }">
+                    <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-2">Access Expires In</div>
+                    <div class="text-2xl font-black text-red-500 font-mono tracking-tight" x-text="timeRemaining"></div>
+                </div>
+            </div>
+        </div>
+    @endif
+
+    {{-- PLAN CARDS --}}
     <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
         @forelse($this->plans as $plan)
             <div class="bg-black border border-slate-800 rounded-2xl p-8 flex flex-col relative overflow-hidden transition hover:border-red-600/60 group shadow-lg">
@@ -143,7 +234,52 @@ new class extends Component {
         @endforelse
     </div>
 
-    {{-- ══════════════════ 1. CONFIRMATION MODAL ══════════════════ --}}
+    {{-- PURCHASE HISTORY TABLE --}}
+    @if(count($this->subscriptionHistory) > 0)
+        <div class="bg-zinc-950 border border-slate-800 rounded-2xl shadow-lg overflow-hidden mt-8">
+            <div class="px-6 py-5 border-b border-slate-800 flex justify-between items-center bg-black">
+                <h3 class="text-lg font-bold text-white">Purchase History</h3>
+            </div>
+            
+            <div class="overflow-x-auto">
+                <table class="w-full text-left text-sm text-slate-400 whitespace-nowrap">
+                    <thead class="bg-zinc-900 border-b border-slate-800 uppercase text-[11px] font-semibold text-slate-500">
+                        <tr>
+                            <th class="px-6 py-4">Date</th>
+                            <th class="px-6 py-4">Plan Name</th>
+                            <th class="px-6 py-4">Valid Until</th>
+                            <th class="px-6 py-4 text-right">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-800/50">
+                        @foreach($this->subscriptionHistory as $history)
+                            <tr class="hover:bg-slate-800/20 transition-colors">
+                                <td class="px-6 py-4">
+                                    <div class="text-slate-300">{{ $history->created_at->format('M d, Y') }}</div>
+                                    <div class="text-[11px] text-slate-500 mt-0.5">{{ $history->created_at->format('h:i A') }}</div>
+                                </td>
+                                <td class="px-6 py-4">
+                                    <span class="text-slate-200 font-bold">{{ $history->plan->name ?? 'Deleted Plan' }}</span>
+                                </td>
+                                <td class="px-6 py-4 font-mono text-xs text-slate-400">
+                                    {{ $history->expires_at ? $history->expires_at->format('M d, Y - h:i A') : 'N/A' }}
+                                </td>
+                                <td class="px-6 py-4 text-right">
+                                    @if($history->status === 'active' && $history->expires_at && $history->expires_at > now())
+                                        <span class="px-2.5 py-1 bg-red-900/30 text-red-500 border border-red-700/50 rounded-md text-[11px] font-bold">Active</span>
+                                    @else
+                                        <span class="px-2.5 py-1 bg-slate-800 text-slate-400 border border-slate-700 rounded-md text-[11px] font-medium">Expired</span>
+                                    @endif
+                                </td>
+                            </tr>
+                        @endforeach
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    @endif
+
+    {{-- 1. CONFIRMATION MODAL --}}
     @if($confirmingPlan)
         <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
             <div class="bg-zinc-950 border border-slate-800 w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden">
@@ -179,7 +315,7 @@ new class extends Component {
         </div>
     @endif
 
-    {{-- ══════════════════ 2. SUCCESS / ERROR RESULT MODAL ══════════════════ --}}
+    {{-- 2. SUCCESS / ERROR RESULT MODAL --}}
     @if($showResultModal)
         <div class="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
             <div class="bg-zinc-950 border border-slate-800 w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden">
