@@ -153,7 +153,7 @@ new class extends Component {
 };
 ?>
 
-<div class="max-w-6xl mx-auto space-y-8 relative" wire:poll.3s="checkPendingStatus">
+<div class="max-w-6xl mx-auto space-y-8 relative" wire:poll.10s="checkPendingStatus">
 
     {{-- ACTIVE PLAN BANNER --}}
     @if($this->activeSubscription)
