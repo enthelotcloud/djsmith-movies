@@ -1,5 +1,5 @@
 <?php
-
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
 Route::view('/', 'home')->name('home');
@@ -11,6 +11,17 @@ Route::view('/terms-of-services', 'terms-of-services')->name('terms');
 
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::view('dashboard', 'dashboard')->name('dashboard');
+});
+
+Route::post('/csrf-debug', function (Request $request) {
+    return response()->json([
+        'session_id'    => session()->getId(),
+        'session_token' => session()->token(),
+        'request_token' => $request->input('_token'),
+        'header_token'  => $request->header('X-CSRF-TOKEN'),
+        'xsrf_header'   => $request->header('X-XSRF-TOKEN'),
+        'cookie_xsrf'   => $request->cookie('XSRF-TOKEN'),
+    ]);
 });
 
 Route::prefix('admin')
