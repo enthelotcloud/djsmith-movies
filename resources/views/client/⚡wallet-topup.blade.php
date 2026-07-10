@@ -208,8 +208,8 @@ new class extends Component {
                         @forelse($this->transactions as $tx)
                             <tr class="hover:bg-zinc-900/50 transition-colors">
                                 <td class="px-6 py-4">
-                                    <div class="text-slate-300">{{ $tx->created_at->format('M d, Y') }}</div>
-                                    <div class="text-[11px] text-slate-500 mt-0.5">{{ $tx->created_at->format('h:i A') }}</div>
+                                   <div class="text-slate-300">{{ $tx->created_at ? \Carbon\Carbon::parse($tx->created_at)->format('M d, Y') : 'Unknown Date' }}</div>
+                                    <div class="text-[11px] text-slate-500 mt-0.5">{{ $tx->created_at ? \Carbon\Carbon::parse($tx->created_at)->format('h:i A') : '--' }}</div>
                                 </td>
                                 <td class="px-6 py-4 font-mono text-xs text-slate-200 font-bold">
                                     {{ $tx->mpesa_receipt_number ?? '—' }}
