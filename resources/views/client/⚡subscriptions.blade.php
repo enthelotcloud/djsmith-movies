@@ -4,7 +4,7 @@ use Livewire\Component;
 use Livewire\Attributes\Computed;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
-use App\Services\WalletService;
+use Illuminate\Support\Facades\Log;
 use App\Services\MpesaService;
 
 new class extends Component {
@@ -82,21 +82,147 @@ new class extends Component {
         $this->isWaitingForMpesa = false; // Reset state if they click a new plan
     }
 
-    public function executeWalletPurchase(WalletService $walletService)
+    /**
+     * 🔥 UPDATED: Inline wallet purchase to avoid 419 error
+     */
+    public function executeWalletPurchase()
     {
+        if ($this->isProcessing) return;
+
+        $planId = $this->confirmingPlanId;
+        $userId = Auth::id();
+
         $this->isProcessing = true;
+
         try {
-            $walletService->purchasePlan(Auth::id(), $this->confirmingPlanId);
+            DB::beginTransaction();
+
+            // Lock user row
+            $user = DB::table('users')
+                ->where('id', $userId)
+                ->lockForUpdate()
+                ->first();
+
+            if (!$user) throw new \Exception("User not found.");
+
+            // Get plan
+            $plan = DB::table('plans')
+                ->where('id', $planId)
+                ->where('is_active', true)
+                ->first();
+
+            if (!$plan) throw new \Exception("Plan not found or inactive.");
+
+            // Check balance
+            $balance = (float) $user->wallet_balance;
+            $price = (float) $plan->price;
+
+            if ($balance < $price) {
+                throw new \Exception("Insufficient wallet balance. You have KES " . number_format($balance, 0) . " but need KES " . number_format($price, 0));
+            }
+
+            // Deduct wallet
+            $newBalance = $balance - $price;
+            DB::table('users')
+                ->where('id', $userId)
+                ->update(['wallet_balance' => $newBalance]);
+
+            // Record wallet transaction
+            DB::table('wallet_transactions')->insert([
+                'user_id' => $userId,
+                'type' => 'debit',
+                'amount' => $price,
+                'balance_before' => $balance,
+                'balance_after' => $newBalance,
+                'reference_type' => 'plan_purchase',
+                'reference_id' => (string) $planId,
+                'description' => 'Payment for ' . $plan->name,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            // Check existing subscription
+            $existingSubscription = DB::table('subscriptions')
+                ->where('user_id', $userId)
+                ->where('status', 'active')
+                ->where('expires_at', '>', now())
+                ->first();
+
+            $remainingMinutes = 0;
+            $currentExpiry = null;
+
+            if ($existingSubscription) {
+                $currentExpiry = \Carbon\Carbon::parse($existingSubscription->expires_at);
+                $remainingMinutes = max(0, (int) now()->diffInMinutes($currentExpiry, false));
+
+                // Deactivate old subscriptions
+                DB::table('subscriptions')
+                    ->where('user_id', $userId)
+                    ->where('status', 'active')
+                    ->update(['status' => 'inactive', 'updated_at' => now()]);
+            }
+
+            // Calculate new expiry
+            if ($existingSubscription && $existingSubscription->plan_id == $planId && $currentExpiry) {
+                // Extending same plan - add to existing expiry
+                $newExpiry = $currentExpiry->copy()->addMinutes((int) $plan->duration_minutes);
+            } else {
+                // New plan or switching - carry over remaining time
+                $newExpiry = now()->addMinutes((int) $plan->duration_minutes + $remainingMinutes);
+            }
+
+            // Create new subscription
+            DB::table('subscriptions')->insert([
+                'user_id' => $userId,
+                'plan_id' => $planId,
+                'status' => 'active',
+                'starts_at' => now(),
+                'expires_at' => $newExpiry,
+                'auto_renew' => 1,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            // Record purchase
+            DB::table('plan_purchases')->insert([
+                'user_id' => $userId,
+                'plan_name' => $plan->name,
+                'amount_paid' => $price,
+                'duration_minutes' => $plan->duration_minutes,
+                'expires_at' => $newExpiry,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            DB::commit();
+
+            // Success message
             $this->modalType = 'success';
-            $this->modalMessage = 'Success! ' . $this->confirmingPlan->name . ' activated. KES ' . number_format($this->confirmingPlan->price) . ' deducted from wallet.';
+            $this->modalMessage = 'Success! ' . $plan->name . ' activated. KES ' . number_format($price, 0) . ' deducted from wallet. Expires: ' . $newExpiry->format('M d, Y h:i A');
             $this->showResultModal = true;
             $this->confirmingPlanId = null;
             unset($this->currentBalance, $this->activeSubscription, $this->purchaseLedger);
+
+            Log::info('Wallet purchase completed', [
+                'user_id' => $userId,
+                'plan' => $plan->name,
+                'amount' => $price
+            ]);
+
         } catch (\Exception $e) {
+            DB::rollBack();
+
+            Log::error('Wallet purchase failed', [
+                'user_id' => $userId,
+                'plan_id' => $planId,
+                'error' => $e->getMessage()
+            ]);
+
             $this->modalType = 'error';
             $this->modalMessage = $e->getMessage();
             $this->showResultModal = true;
         }
+
         $this->isProcessing = false;
     }
 
