@@ -153,7 +153,11 @@ new class extends Component {
 };
 ?>
 
-<div class="max-w-6xl mx-auto space-y-8 relative" wire:poll.10s="checkPendingStatus">
+@if ($isPending)
+    <div class="max-w-6xl mx-auto space-y-8 relative" wire:poll.10s="checkPendingStatus">
+@else
+    <div class="max-w-6xl mx-auto space-y-8 relative">
+@endif
 
     {{-- ACTIVE PLAN BANNER --}}
     @if($this->activeSubscription)
