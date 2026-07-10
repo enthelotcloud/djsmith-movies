@@ -13,10 +13,6 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::view('dashboard', 'dashboard')->name('dashboard');
 });
 
-Route::get('/key-check', function () {
-    return config('app.key');
-});
-
 Route::prefix('admin')
     ->name('admin.')
     ->middleware(['auth', 'role:admin'])
