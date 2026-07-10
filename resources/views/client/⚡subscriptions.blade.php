@@ -7,12 +7,12 @@ use Illuminate\Support\Facades\DB;
 use App\Services\MpesaService;
 
 new class extends Component {
-    
+
     // 🚨 419 FIX: Only store the ID, never the object
-    public $confirmingPlanId = null; 
-    
+    public $confirmingPlanId = null;
+
     public $showResultModal = false;
-    public $modalType = ''; 
+    public $modalType = '';
     public $modalMessage = '';
     public $isProcessing = false;
 
@@ -39,8 +39,8 @@ new class extends Component {
 
     // DYNAMICALLY FETCH PLAN OBJECT FOR MODAL
     #[Computed]
-    public function confirmingPlan() { 
-        return $this->confirmingPlanId ? DB::table('plans')->where('id', $this->confirmingPlanId)->first() : null; 
+    public function confirmingPlan() {
+        return $this->confirmingPlanId ? DB::table('plans')->where('id', $this->confirmingPlanId)->first() : null;
     }
 
     // THE ACCESS KEY
@@ -220,18 +220,18 @@ new class extends Component {
     @if($this->activeSubscription && $this->activeSubscription->plan)
         <div class="bg-gradient-to-r from-red-950 to-black border border-red-900 rounded-2xl p-8 shadow-2xl relative overflow-hidden">
             <div class="absolute top-0 right-0 w-64 h-64 bg-red-600/10 blur-3xl rounded-full pointer-events-none"></div>
-            
+
             <div class="relative z-10 flex flex-col md:flex-row justify-between items-center gap-6">
                 <div>
                     <h2 class="text-sm font-bold text-red-500 uppercase tracking-widest mb-1">Currently Active</h2>
                     <div class="text-4xl font-black text-white">{{ $this->activeSubscription->plan->name }}</div>
                 </div>
 
-                @php 
-                    $secondsRemaining = now()->diffInSeconds(\Carbon\Carbon::parse($this->activeSubscription->expires_at), false); 
+                @php
+                    $secondsRemaining = now()->diffInSeconds(\Carbon\Carbon::parse($this->activeSubscription->expires_at), false);
                 @endphp
 
-                <div class="bg-black/60 border border-red-500/30 rounded-xl p-5 text-center min-w-[250px]" 
+                <div class="bg-black/60 border border-red-500/30 rounded-xl p-5 text-center min-w-[250px]"
                      x-data="{
                          s: {{ max(0, $secondsRemaining) }},
                          lbl: 'Loading...',
@@ -282,7 +282,7 @@ new class extends Component {
                 @php
                     $hasActive = !is_null($this->activeSubscription);
                     $isCurrent = $hasActive && $this->activeSubscription->plan_id === $plan->id;
-                    
+
                     if ($isCurrent) {
                         $btnText = 'Extend Time';
                         $btnColor = 'bg-red-900/50 text-red-500 border-red-600/50 hover:bg-red-600 hover:text-white';
@@ -358,7 +358,7 @@ new class extends Component {
         <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
             <div class="bg-[#111111] border border-slate-800 w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden">
                 <div class="p-6 text-center">
-                    
+
                     @if(count($pendingCheckouts) > 0)
                         <div class="w-16 h-16 bg-amber-950/50 text-amber-500 rounded-full flex items-center justify-center mx-auto mb-4 border border-amber-900/50 animate-pulse">
                             <svg class="w-8 h-8 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
@@ -370,7 +370,7 @@ new class extends Component {
                             <svg class="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
                         </div>
                         <h3 class="text-xl font-bold text-white mb-2">{{ $this->confirmingPlan->name }}</h3>
-                        
+
                         @if($missingAmount <= 0)
                             <p class="text-sm text-slate-400 mb-6">Deduct <strong class="text-red-500">KES {{ number_format($this->confirmingPlan->price, 2) }}</strong> from your wallet?</p>
                             <button wire:click="executeWalletPurchase" wire:loading.attr="disabled" class="w-full py-3 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold transition mb-3">
@@ -383,7 +383,7 @@ new class extends Component {
                                 <div class="text-xs text-slate-400">Wallet: <span class="float-right text-red-400">- KES {{ number_format($this->currentBalance, 0) }}</span></div>
                                 <div class="border-t border-slate-800 my-2 pt-2 text-sm font-bold text-white">Top-up Required: <span class="float-right">KES {{ number_format($missingAmount, 0) }}</span></div>
                             </div>
-                            
+
                             <div class="mb-4 text-left">
                                 <label class="block text-xs font-medium text-slate-400 mb-1.5">M-Pesa Number</label>
                                 <input type="text" wire:model="phone" class="w-full bg-black border border-slate-700 rounded-lg px-4 py-2.5 text-slate-200">
@@ -395,7 +395,7 @@ new class extends Component {
                                 <span wire:loading wire:target="executeMpesaPurchase">Pushing...</span>
                             </button>
                         @endif
-                        
+
                         <button wire:click="closeModals" wire:loading.attr="disabled" class="w-full py-3 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-slate-800 text-slate-300 font-medium">Cancel</button>
                     @endif
                 </div>
@@ -420,7 +420,7 @@ new class extends Component {
                         <h3 class="text-xl font-bold text-white mb-2">Notice</h3>
                     @endif
                     <p class="text-sm text-slate-400 mb-6 leading-relaxed">{{ $modalMessage }}</p>
-                    
+
                     {{-- 🚨 FORCE RELOAD TO CLEAR LIVEWIRE STATE ON SUCCESS --}}
                     @if($modalType === 'success')
                         <button onclick="window.location.reload()" class="w-full py-3 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold">Done</button>
