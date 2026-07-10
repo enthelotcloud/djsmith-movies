@@ -154,11 +154,7 @@ new class extends Component {
 ?>
 
 {{-- <div class="max-w-6xl mx-auto space-y-8 relative" wire:poll.10s="checkPendingStatus"> --}}
-<div class="max-w-6xl mx-auto space-y-8 relative"
-     @if(count($pendingCheckouts) > 0)
-        wire:poll.10s="checkPendingStatus"
-     @endif
->
+<div class="max-w-6xl mx-auto space-y-8 relative" wire:poll.10s="checkPendingStatus">
     {{-- ACTIVE PLAN BANNER --}}
     @if($this->activeSubscription)
         <div class="bg-gradient-to-r from-red-950 to-black border border-red-900 rounded-2xl p-8 shadow-2xl flex flex-col md:flex-row justify-between items-center gap-6">
