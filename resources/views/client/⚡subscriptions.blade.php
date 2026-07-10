@@ -11,7 +11,10 @@ new class extends Component {
     public $confirmingPlanId = null;
     public $phone;
     public $isProcessing = false;
-    public $pendingCheckouts = [];
+
+    // Replaced the array with a single active state
+    public $activeCheckoutId = null;
+    public $isWaitingForMpesa = false;
 
     public $showResultModal = false;
     public $modalType = 'success';
@@ -20,13 +23,19 @@ new class extends Component {
     public function mount()
     {
         $this->phone = Auth::user()->phone;
-        // Check if there's a pending M-Pesa payment specifically for a plan
-        $this->pendingCheckouts = DB::table('mpesa_transactions')
+
+        // If they refresh the page, check if they were in the middle of a transaction
+        $pendingTx = DB::table('mpesa_transactions')
             ->where('user_id', Auth::id())
             ->where('status', 'pending')
             ->whereNotNull('target_plan_id')
-            ->pluck('checkout_request_id')
-            ->toArray();
+            ->first();
+
+        if ($pendingTx) {
+            $this->confirmingPlanId = $pendingTx->target_plan_id;
+            $this->activeCheckoutId = $pendingTx->checkout_request_id;
+            $this->isWaitingForMpesa = true;
+        }
     }
 
     #[Computed]
@@ -70,6 +79,7 @@ new class extends Component {
     public function confirmPurchase($planId)
     {
         $this->confirmingPlanId = $planId;
+        $this->isWaitingForMpesa = false; // Reset state if they click a new plan
     }
 
     public function executeWalletPurchase(WalletService $walletService)
@@ -110,7 +120,11 @@ new class extends Component {
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
-            $this->pendingCheckouts[] = $response['CheckoutRequestID'];
+
+            // Switch UI to the countdown mode
+            $this->activeCheckoutId = $response['CheckoutRequestID'];
+            $this->isWaitingForMpesa = true;
+
         } else {
             $this->modalType = 'error';
             $this->modalMessage = 'M-Pesa push failed. Please check your number and try again.';
@@ -120,41 +134,54 @@ new class extends Component {
         $this->isProcessing = false;
     }
 
-    public function checkPendingStatus()
+    // This is ONLY called once the 20-second timer finishes, or if the user clicks "Check Status" manually
+    public function verifyPaymentStatus()
     {
-        if (empty($this->pendingCheckouts)) return;
+        if (!$this->activeCheckoutId) return;
 
-        $updatedTx = DB::table('mpesa_transactions')
-            ->whereIn('checkout_request_id', $this->pendingCheckouts)
-            ->whereIn('status', ['completed', 'failed'])
-            ->get();
+        $tx = DB::table('mpesa_transactions')
+            ->where('checkout_request_id', $this->activeCheckoutId)
+            ->first();
 
-        foreach ($updatedTx as $tx) {
-            if ($tx->status === 'completed') {
-                $this->modalType = 'success';
-                $this->modalMessage = 'Payment received! Your plan is now active.';
-                $this->showResultModal = true;
-                $this->confirmingPlanId = null;
-            } else {
-                $this->modalType = 'error';
-                $this->modalMessage = 'Payment failed: ' . ($tx->result_desc ?? 'Cancelled');
-                $this->showResultModal = true;
-            }
-            $this->pendingCheckouts = array_diff($this->pendingCheckouts, [$tx->checkout_request_id]);
-            unset($this->currentBalance, $this->activeSubscription, $this->purchaseLedger);
+        if (!$tx) return;
+
+        if ($tx->status === 'completed') {
+            $this->modalType = 'success';
+            $this->modalMessage = 'Payment received! Your plan is now active.';
+            $this->showResultModal = true;
+            $this->resetCheckoutState();
+        } elseif ($tx->status === 'failed') {
+            $this->modalType = 'error';
+            $this->modalMessage = 'Payment failed: ' . ($tx->result_desc ?? 'Cancelled by user');
+            $this->showResultModal = true;
+            $this->resetCheckoutState();
+        } else {
+            // Still pending after 20 seconds.
+            // We don't close the modal, we just show a subtle error and let them manually check again.
+            $this->dispatch('notify-toast', type: 'warning', message: 'Still waiting for Safaricom. Did you enter your PIN?');
         }
+
+        unset($this->currentBalance, $this->activeSubscription, $this->purchaseLedger);
+    }
+
+    public function resetCheckoutState()
+    {
+        $this->confirmingPlanId = null;
+        $this->isWaitingForMpesa = false;
+        $this->activeCheckoutId = null;
     }
 
     public function closeModals()
     {
-        $this->confirmingPlanId = null;
+        $this->resetCheckoutState();
         $this->showResultModal = false;
     }
 };
 ?>
 
-{{-- <div class="max-w-6xl mx-auto space-y-8 relative" wire:poll.10s="checkPendingStatus"> --}}
-<div class="max-w-6xl mx-auto space-y-8 relative" wire:poll.10s="checkPendingStatus">
+{{-- 🚨 REMOVED wire:poll entirely. This container is now static. --}}
+<div class="max-w-6xl mx-auto space-y-8 relative" x-data @notify-toast.window="alert($event.detail.message)">
+
     {{-- ACTIVE PLAN BANNER --}}
     @if($this->activeSubscription)
         <div class="bg-gradient-to-r from-red-950 to-black border border-red-900 rounded-2xl p-8 shadow-2xl flex flex-col md:flex-row justify-between items-center gap-6">
@@ -239,16 +266,51 @@ new class extends Component {
         </div>
     </div>
 
-    {{-- CONFIRMATION MODAL --}}
+    {{-- CONFIRMATION & COUNTDOWN MODAL --}}
     @if($this->confirmingPlan)
         <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
             <div class="bg-[#111111] border border-slate-800 w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden p-6 text-center">
 
-                @if(count($pendingCheckouts) > 0)
-                    <svg class="w-12 h-12 animate-spin text-amber-500 mx-auto mb-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                    <h3 class="text-xl font-bold text-white mb-2">Check Your Phone</h3>
-                    <p class="text-sm text-slate-400 mb-6">Enter your M-Pesa PIN. The plan will activate automatically when payment completes.</p>
+                @if($this->isWaitingForMpesa)
+                    {{-- 🚨 THE ALPINE.JS COUNTDOWN COMPONENT 🚨 --}}
+                    <div x-data="{
+                            countdown: 20,
+                            timer: null,
+                            startTimer() {
+                                this.timer = setInterval(() => {
+                                    if (this.countdown > 0) {
+                                        this.countdown--;
+                                    } else {
+                                        clearInterval(this.timer);
+                                        $wire.verifyPaymentStatus(); // Server ping ONLY at 0
+                                    }
+                                }, 1000);
+                            }
+                         }"
+                         x-init="startTimer()"
+                         class="space-y-4">
+
+                        <div class="relative w-20 h-20 mx-auto">
+                            <svg class="w-full h-full text-slate-800" viewBox="0 0 36 36"><path class="stroke-current" stroke-width="3" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/></svg>
+                            <svg class="w-full h-full text-amber-500 absolute top-0 left-0 drop-shadow-[0_0_8px_rgba(245,158,11,0.5)]" viewBox="0 0 36 36" style="transform: rotate(-90deg);">
+                                <path class="stroke-current" stroke-dasharray="100, 100" :stroke-dashoffset="100 - ((countdown / 20) * 100)" stroke-width="3" stroke-linecap="round" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" style="transition: stroke-dashoffset 1s linear;"/>
+                            </svg>
+                            <div class="absolute inset-0 flex items-center justify-center text-xl font-bold text-white font-mono" x-text="countdown"></div>
+                        </div>
+
+                        <h3 class="text-xl font-bold text-white">Check Your Phone</h3>
+                        <p class="text-sm text-slate-400">Please enter your M-Pesa PIN. We are waiting for Safaricom to process the payment.</p>
+
+                        {{-- Manual verify button appears when countdown hits 0 --}}
+                        <div x-show="countdown === 0" x-transition.opacity class="pt-4 border-t border-slate-800">
+                            <button wire:click="verifyPaymentStatus" wire:loading.attr="disabled" class="w-full py-3 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-slate-700 text-amber-500 font-bold transition flex justify-center items-center gap-2">
+                                <span wire:loading.remove wire:target="verifyPaymentStatus">Verify Payment Now</span>
+                                <span wire:loading wire:target="verifyPaymentStatus">Checking Database...</span>
+                            </button>
+                        </div>
+                    </div>
                 @else
+                    {{-- NORMAL CHECKOUT VIEW --}}
                     <h2 class="text-xl font-bold text-white mb-1">Confirm Plan</h2>
                     <p class="text-sm text-slate-400 mb-5">You are selecting <strong class="text-white">{{ $this->confirmingPlan->name }}</strong></p>
 
@@ -286,7 +348,10 @@ new class extends Component {
                     @endif
                 @endif
 
-                <button wire:click="closeModals" class="w-full py-3.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-slate-800 text-slate-300 font-medium transition">Cancel</button>
+                {{-- The universal cancel button --}}
+                <button wire:click="closeModals" class="w-full mt-3 py-3.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-slate-800 text-slate-300 font-medium transition">
+                    Cancel
+                </button>
             </div>
         </div>
     @endif
