@@ -28,6 +28,10 @@
                     <flux:sidebar.item icon="currency-dollar" :href="route('admin.plans')" :current="request()->routeIs('admin.plans')" wire:navigate>
                         {{ __('Plans') }}
                     </flux:sidebar.item>
+
+                    <flux:sidebar.item icon="currency-dollar" :href="route('admin.movies')" :current="request()->routeIs('admin.movies')" wire:navigate>
+                        {{ __('Movies') }}
+                    </flux:sidebar.item>
                 @endif
 
                 {{-- 💼 STAFF AREA --}}
@@ -57,7 +61,7 @@
 
             <flux:spacer />
 
-            
+
             <x-desktop-user-menu class="hidden lg:block" :name="auth()->user()->name" />
         </flux:sidebar>
 

@@ -13,16 +13,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::view('dashboard', 'dashboard')->name('dashboard');
 });
 
-Route::post('/csrf-debug', function (Request $request) {
-    return response()->json([
-        'session_id'    => session()->getId(),
-        'session_token' => session()->token(),
-        'request_token' => $request->input('_token'),
-        'header_token'  => $request->header('X-CSRF-TOKEN'),
-        'xsrf_header'   => $request->header('X-XSRF-TOKEN'),
-        'cookie_xsrf'   => $request->cookie('XSRF-TOKEN'),
-    ]);
-});
+
 
 Route::prefix('admin')
     ->name('admin.')
@@ -32,6 +23,7 @@ Route::prefix('admin')
     Route::livewire('/users', 'admin::user-manager')->name('users');
     Route::livewire('/dashboard', 'admin::dashboard')->name('dashboard');
     Route::livewire('/plans', 'admin::plan-manager')->name('plans');
+    Route::livewire('/movies', 'admin::movie-manager')->name('movies');
 });
 
 Route::prefix('client')
