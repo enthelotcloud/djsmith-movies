@@ -14,7 +14,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
 });
 
 Route::livewire('/watch/{slug}', 'pages::player')
-    ->middleware(['auth'])
+    ->middleware(['auth', 'secure.video'])
     ->name('client.player');
 
 Route::prefix('admin')

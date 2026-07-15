@@ -1,7 +1,7 @@
 <?php
 
 use App\Http\Middleware\CheckRole;
-use App\Support\TrustedHostResolver;
+use App\Http\Middleware\SecureVideoAccess;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -17,25 +17,11 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'role' => CheckRole::class,
+            'secure.video' => SecureVideoAccess::class, // Register our new shield here
         ]);
 
-        $middleware->trustHosts(
-            fn () => TrustedHostResolver::resolve(
-                (string) env('APP_URL', 'http://localhost'),
-                (string) env('APP_TRUSTED_HOSTS', ''),
-            ),
-        );
-
-        $middleware->trustProxies(
-            '*',
-            Request::HEADER_X_FORWARDED_FOR |
-            Request::HEADER_X_FORWARDED_HOST |
-            Request::HEADER_X_FORWARDED_PORT |
-            Request::HEADER_X_FORWARDED_PROTO,
-        );
+        $middleware->trustProxies(at: '*');
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        $exceptions->shouldRenderJsonWhen(
-            fn (Request $request) => $request->is('api/*'),
-        );
+        //
     })->create();

@@ -3,184 +3,48 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Nice Try! 😂 - Dj Smith Movies</title>
+    <title>Access Denied - Dj Smith Movies</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             background: #000;
             color: #fff;
-            font-family: 'Georgia', serif;
+            font-family: Arial, sans-serif;
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
             text-align: center;
             padding: 20px;
-            overflow: hidden;
         }
-
-        .container {
-            position: relative;
-            z-index: 10;
-            max-width: 600px;
-        }
-
-        .emoji {
-            font-size: 80px;
-            animation: bounce 1s infinite;
-        }
-
+        .container { max-width: 600px; }
+        .emoji { font-size: 80px; animation: bounce 1s infinite; }
         @keyframes bounce {
             0%, 100% { transform: translateY(0); }
             50% { transform: translateY(-20px); }
         }
-
-        h1 {
-            font-size: 48px;
-            font-weight: 900;
-            margin: 20px 0;
-            background: linear-gradient(to right, #dc2626, #f59e0b);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-
-        .verse {
-            font-style: italic;
-            color: #9ca3af;
-            font-size: 18px;
-            line-height: 1.8;
-            margin: 30px 0;
-            padding: 20px;
-            border-left: 3px solid #dc2626;
-            border-right: 3px solid #dc2626;
-        }
-
-        .message {
-            color: #6b7280;
-            font-size: 16px;
-            line-height: 1.6;
-            margin: 30px 0;
-        }
-
-        .highlight {
-            color: #f59e0b;
-            font-weight: bold;
-        }
-
-        .button {
-            display: inline-block;
-            padding: 15px 40px;
-            background: #dc2626;
-            color: white;
-            text-decoration: none;
-            border-radius: 12px;
-            font-weight: bold;
-            font-family: 'Arial', sans-serif;
-            transition: all 0.3s;
-            margin-top: 20px;
-        }
-
-        .button:hover {
-            background: #b91c1c;
-            transform: scale(1.05);
-            box-shadow: 0 0 30px rgba(220, 38, 38, 0.4);
-        }
-
-        .bg-pattern {
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            opacity: 0.05;
-            background-image:
-                linear-gradient(45deg, #dc2626 25%, transparent 25%),
-                linear-gradient(-45deg, #dc2626 25%, transparent 25%),
-                linear-gradient(45deg, transparent 75%, #dc2626 75%),
-                linear-gradient(-45deg, transparent 75%, #dc2626 75%);
-            background-size: 20px 20px;
-            background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
-            animation: patternMove 20s linear infinite;
-        }
-
-        @keyframes patternMove {
-            0% { background-position: 0 0, 0 10px, 10px -10px, -10px 0px; }
-            100% { background-position: 40px 40px, 40px 50px, 50px 30px, 30px 40px; }
-        }
-
-        .floating {
-            position: fixed;
-            font-size: 40px;
-            opacity: 0.3;
-            animation: float 6s ease-in-out infinite;
-        }
-
-        @keyframes float {
-            0%, 100% { transform: translateY(0) rotate(0deg); }
-            50% { transform: translateY(-30px) rotate(10deg); }
-        }
+        h1 { font-size: 48px; font-weight: 900; margin: 20px 0; color: #dc2626; }
+        .verse { font-style: italic; color: #9ca3af; font-size: 18px; line-height: 1.8; margin: 20px 0; padding: 15px; border-left: 3px solid #dc2626; border-right: 3px solid #dc2626; }
+        .message { color: #6b7280; font-size: 16px; line-height: 1.6; margin: 20px 0; }
+        .highlight { color: #f59e0b; font-weight: bold; }
+        .button { display: inline-block; padding: 15px 40px; background: #dc2626; color: white; text-decoration: none; border-radius: 12px; font-weight: bold; margin-top: 20px; transition: 0.3s; }
+        .button:hover { background: #b91c1c; transform: scale(1.05); }
     </style>
 </head>
 <body>
-    <div class="bg-pattern"></div>
-
-    <!-- Floating emojis for fun -->
-    <div class="floating" style="top: 10%; left: 10%; animation-delay: 0s;">🔒</div>
-    <div class="floating" style="top: 20%; right: 15%; animation-delay: 1s;">🛡️</div>
-    <div class="floating" style="bottom: 30%; left: 20%; animation-delay: 2s;">😂</div>
-    <div class="floating" style="bottom: 15%; right: 10%; animation-delay: 3s;">🚫</div>
-    <div class="floating" style="top: 50%; left: 5%; animation-delay: 4s;">✋</div>
-    <div class="floating" style="top: 40%; right: 5%; animation-delay: 5s;">🙅</div>
-
     <div class="container">
         <div class="emoji">🕵️</div>
-
-        <h1>Nice Try, Hacker! 😂</h1>
-
-        <div class="verse">
-            "Thou shalt not steal."<br>
-            — Exodus 20:15
-        </div>
-
-        <div class="verse">
-            "The wicked borrow and do not repay,<br>
-            but the righteous give generously."<br>
-            — Psalm 37:21
-        </div>
-
+        <h1>Nice Try! 😂</h1>
+        <div class="verse">"Thou shalt not steal." — Exodus 20:15</div>
         <div class="message">
-            <p>We see you trying to download our precious content! 👀</p>
-            <p>Did you really think it would be <span class="highlight">that easy</span>?</p>
-            <p>Nice try, but this isn't a buffet — <span class="highlight">you gotta pay to play!</span> 🎬</p>
+            <p>We see you trying to download our content! 👀</p>
+            <p>Nice try, but <span class="highlight">you gotta pay to play!</span> 🎬</p>
         </div>
-
-        <div class="verse">
-            "Let him who stole steal no longer,<br>
-            but rather let him labor, working with his hands<br>
-            what is good, that he may have something<br>
-            to give him who has need."<br>
-            — Ephesians 4:28
-        </div>
-
+        <div class="verse">"Let him who stole steal no longer..." — Ephesians 4:28</div>
         <div class="message">
-            <p>Instead of trying to pirate, why not <span class="highlight">subscribe legitimately</span>?</p>
-            <p>It's way easier, and you won't go to jail! 😅</p>
-            <p>Plus, you'll sleep better at night knowing you're <span class="highlight">not a digital thief</span>.</p>
+            <p>Why not <span class="highlight">subscribe legitimately</span> instead?</p>
         </div>
-
-        <a href="/" class="button">
-            🎬 I'll Be Good — Take Me Home
-        </a>
-
-        <p style="color: #4b5563; margin-top: 20px; font-size: 12px;">
-            P.S. — This download attempt has been logged. Just kidding... or are we? 🤔
-        </p>
+        <a href="/" class="button">🎬 Take Me Home</a>
     </div>
 </body>
 </html>
