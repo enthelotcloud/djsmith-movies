@@ -2,7 +2,7 @@
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
-Route::view('/', 'home')->name('home');
+Route::livewire('/', 'pages::home')->name('home');
 Route::view('/about', 'about')->name('about');
 Route::view('/contact', 'contact')->name('contact');
 Route::view('/faqs', 'faqs')->name('faqs');
@@ -13,7 +13,9 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::view('dashboard', 'dashboard')->name('dashboard');
 });
 
-
+Route::livewire('/watch/{slug}', 'pages::player')
+    ->middleware(['auth'])
+    ->name('client.player');
 
 Route::prefix('admin')
     ->name('admin.')
@@ -24,6 +26,7 @@ Route::prefix('admin')
     Route::livewire('/dashboard', 'admin::dashboard')->name('dashboard');
     Route::livewire('/plans', 'admin::plan-manager')->name('plans');
     Route::livewire('/movies', 'admin::movie-manager')->name('movies');
+    Route::livewire('/categories', 'admin::category-manager')->name('categories');
 });
 
 Route::prefix('client')

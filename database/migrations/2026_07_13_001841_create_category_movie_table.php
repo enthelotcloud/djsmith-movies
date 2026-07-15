@@ -6,20 +6,17 @@ use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
-    /**
-     * Run the migrations.
-     */
-    public function up(): void {
+    public function up(): void
+    {
         Schema::create('category_movie', function (Blueprint $table) {
-            $table->id();
-            $table->foreignId('movie_id')->constrained()->cascadeOnDelete();
-            $table->foreignId('moviecategory_id')->constrained()->cascadeOnDelete();
+            $table->foreignId('movie_id')->constrained('movies')->cascadeOnDelete();
+            $table->foreignId('moviecategory_id')->constrained('moviecategories')->cascadeOnDelete();
+
+            // Prevents duplicate tags on the same movie
+            $table->primary(['movie_id', 'moviecategory_id']);
         });
     }
 
-    /**
-     * Reverse the migrations.
-     */
     public function down(): void
     {
         Schema::dropIfExists('category_movie');

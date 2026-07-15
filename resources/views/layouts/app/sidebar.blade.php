@@ -29,9 +29,14 @@
                         {{ __('Plans') }}
                     </flux:sidebar.item>
 
-                    <flux:sidebar.item icon="currency-dollar" :href="route('admin.movies')" :current="request()->routeIs('admin.movies')" wire:navigate>
+                    <flux:sidebar.item icon="video-camera" :href="route('admin.movies')" :current="request()->routeIs('admin.movies')" wire:navigate>
                         {{ __('Movies') }}
                     </flux:sidebar.item>
+
+                    <flux:sidebar.item icon="server-stack" :href="route('admin.categories')" :current="request()->routeIs('admin.categories')" wire:navigate>
+                        {{ __('Categories') }}
+                    </flux:sidebar.item>
+
                 @endif
 
                 {{-- 💼 STAFF AREA --}}
