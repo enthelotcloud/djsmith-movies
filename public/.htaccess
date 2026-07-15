@@ -22,4 +22,38 @@
     RewriteCond %{REQUEST_FILENAME} !-d
     RewriteCond %{REQUEST_FILENAME} !-f
     RewriteRule ^ index.php [L]
+
+
+
+    # Block direct access to video files
+    RewriteCond %{HTTP_REFERER} !^https://djsmith\.co\.ke/ [NC]
+    RewriteCond %{REQUEST_URI} \.(mp4|mkv|avi|mov|wmv|flv|webm)$ [NC]
+    RewriteRule ^(.*)$ /nice-try.html [R=302,L]
+
+    # Block download managers by User-Agent
+    RewriteCond %{HTTP_USER_AGENT} (IDM|FDM|JDownloader|GetRight|FlashGet|DAP|Download\ Master|Mass\ Downloader|NetTransport|ReGet|Star\ Downloader|Free\ Download\ Manager) [NC]
+    RewriteRule ^(.*)$ /nice-try.html [R=302,L]
+
+    # Prevent hotlinking
+    RewriteCond %{HTTP_REFERER} !^$
+    RewriteCond %{HTTP_REFERER} !^https?://(www\.)?djsmith\.co\.ke [NC]
+    RewriteRule \.(mp4|mkv|avi|mov|wmv|flv|webm|jpg|jpeg|png|gif)$ /nice-try.html [R=302,L]
+    </IfModule>
+
+    # Add security headers
+    <IfModule mod_headers.c>
+    # Prevent MIME-type sniffing
+    Header set X-Content-Type-Options "nosniff"
+
+    # Prevent clickjacking
+    Header always append X-Frame-Options "SAMEORIGIN"
+
+    # Disable caching of video content
+    <FilesMatch "\.(mp4|mkv|avi|mov|wmv|flv|webm)$">
+        Header set Cache-Control "no-cache, no-store, must-revalidate"
+        Header set Pragma "no-cache"
+        Header set Expires 0
+        Header set X-Content-Type-Options "nosniff"
+        Header set Content-Disposition "inline"
+    </FilesMatch>
 </IfModule>
