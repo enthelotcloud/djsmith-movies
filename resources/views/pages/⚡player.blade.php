@@ -6,6 +6,7 @@ use Livewire\Attributes\Title;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
 
 new #[Layout('layouts.guest.app')]
@@ -15,6 +16,8 @@ class extends Component
     public $slug;
     public $movie;
     public $videoUrl;
+    public $thumbnailUrl;
+    public $error = null;
 
     public function mount($slug)
     {
@@ -39,21 +42,88 @@ class extends Component
                 ->exists();
 
             if (!$hasActiveSub) {
-                abort(403, 'This is premium content. Please upgrade your subscription to watch.');
+                session()->flash('premium_required', 'This is premium content. Please subscribe or top up your wallet to continue watching.');
+                return redirect()->route('client.subscriptions');
             }
         }
 
         // Concurrency Check (Single Instance)
         $this->enforceSingleSession();
 
-        // Generate secure, expiring Backblaze B2 link (valid for 4 hours)
-        if ($this->movie->type === 'movie' && $this->movie->video_path) {
+        // Generate video URL with error handling
+        $this->generateVideoUrl();
+
+        // Generate thumbnail URL with error handling
+        $this->generateThumbnailUrl();
+    }
+
+    private function generateVideoUrl()
+    {
+        if ($this->movie->type !== 'movie' || !$this->movie->video_path) {
+            abort(404, 'Video file not found or this is a series episode.');
+        }
+
+        try {
+            // Check if B2 disk is configured
+            if (!config('filesystems.disks.b2.key') || !config('filesystems.disks.b2.bucket')) {
+                // Fallback: try to use a direct URL if stored
+                if (filter_var($this->movie->video_path, FILTER_VALIDATE_URL)) {
+                    $this->videoUrl = $this->movie->video_path;
+                } else {
+                    Log::error('B2 Storage not configured', [
+                        'movie_id' => $this->movie->id,
+                        'video_path' => $this->movie->video_path
+                    ]);
+                    $this->error = 'Video storage is not properly configured. Please contact support.';
+                }
+                return;
+            }
+
             $this->videoUrl = Storage::disk('b2')->temporaryUrl(
                 $this->movie->video_path,
                 now()->addHours(4)
             );
-        } else {
-            abort(404, 'Video file not found or this is a series episode.');
+        } catch (\Exception $e) {
+            Log::error('Failed to generate video URL', [
+                'movie_id' => $this->movie->id,
+                'error' => $e->getMessage(),
+                'video_path' => $this->movie->video_path
+            ]);
+
+            // Fallback: try direct URL
+            if (filter_var($this->movie->video_path, FILTER_VALIDATE_URL)) {
+                $this->videoUrl = $this->movie->video_path;
+            } else {
+                $this->error = 'Unable to load video. Please try again later.';
+            }
+        }
+    }
+
+    private function generateThumbnailUrl()
+    {
+        if (!$this->movie->thumbnail_path) return;
+
+        try {
+            if (!config('filesystems.disks.b2.key') || !config('filesystems.disks.b2.bucket')) {
+                if (filter_var($this->movie->thumbnail_path, FILTER_VALIDATE_URL)) {
+                    $this->thumbnailUrl = $this->movie->thumbnail_path;
+                }
+                return;
+            }
+
+            $this->thumbnailUrl = Storage::disk('b2')->temporaryUrl(
+                $this->movie->thumbnail_path,
+                now()->addHours(2)
+            );
+        } catch (\Exception $e) {
+            Log::error('Failed to generate thumbnail URL', [
+                'movie_id' => $this->movie->id,
+                'error' => $e->getMessage()
+            ]);
+
+            if (filter_var($this->movie->thumbnail_path, FILTER_VALIDATE_URL)) {
+                $this->thumbnailUrl = $this->movie->thumbnail_path;
+            }
         }
     }
 
@@ -87,8 +157,8 @@ class extends Component
     class="min-h-screen bg-black text-white relative flex flex-col"
     x-data
     wire:poll.60s="pingHeartbeat"
-    @blur.window="document.getElementById('video-player').classList.add('blur-2xl', 'grayscale')"
-    @focus.window="document.getElementById('video-player').classList.remove('blur-2xl', 'grayscale')">
+    @blur.window="document.getElementById('video-player')?.classList.add('blur-2xl', 'grayscale')"
+    @focus.window="document.getElementById('video-player')?.classList.remove('blur-2xl', 'grayscale')">
 
     {{-- Anti-Piracy Scripts --}}
     <script>
@@ -122,27 +192,56 @@ class extends Component
 
     {{-- Video Player Container --}}
     <div class="flex-1 flex items-center justify-center bg-black relative">
-        <video
-            id="video-player"
-            controls
-            controlsList="nodownload"
-            oncontextmenu="return false;"
-            class="w-full h-screen max-h-screen object-contain transition-all duration-300"
-            autoplay
-            @if($movie->thumbnail_path)
-                poster="{{ Storage::disk('b2')->temporaryUrl($movie->thumbnail_path, now()->addHours(2)) }}"
-            @endif
-        >
-            <source src="{{ $videoUrl }}" type="video/mp4">
-            Your browser does not support the video tag.
-        </video>
+        @if($error)
+            {{-- Error State --}}
+            <div class="text-center p-8">
+                <div class="w-20 h-20 rounded-full bg-red-600/10 border border-red-500/30 flex items-center justify-center mx-auto mb-6">
+                    <svg class="w-10 h-10 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                    </svg>
+                </div>
+                <h3 class="text-xl font-bold text-white mb-2">Playback Error</h3>
+                <p class="text-gray-400 mb-6">{{ $error }}</p>
+                <a href="{{ route('home') }}" wire:navigate class="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold transition">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
+                    </svg>
+                    Back to Browse
+                </a>
+            </div>
+        @elseif($videoUrl)
+            <video
+                id="video-player"
+                controls
+                controlsList="nodownload"
+                oncontextmenu="return false;"
+                class="w-full h-screen max-h-screen object-contain transition-all duration-300"
+                autoplay
+                @if($thumbnailUrl)
+                    poster="{{ $thumbnailUrl }}"
+                @endif
+            >
+                <source src="{{ $videoUrl }}" type="video/mp4">
+                Your browser does not support the video tag.
+            </video>
+        @else
+            {{-- Loading State --}}
+            <div class="text-center p-8">
+                <div class="w-20 h-20 rounded-full border-4 border-red-600 border-t-transparent animate-spin mx-auto mb-6"></div>
+                <p class="text-gray-400">Loading video...</p>
+            </div>
+        @endif
     </div>
 
     {{-- Description Overlay (Bottom) --}}
-    <div class="w-full absolute bottom-0 left-0 z-40 p-8 bg-gradient-to-t from-black via-black/80 to-transparent opacity-0 hover:opacity-100 transition duration-500 flex items-end">
-        <div class="max-w-4xl pointer-events-auto">
-            <h2 class="text-3xl font-black mb-2">{{ $movie->title }}</h2>
-            <p class="text-gray-400 text-sm leading-relaxed">{{ $movie->description }}</p>
+    @if($videoUrl)
+        <div class="w-full absolute bottom-0 left-0 z-40 p-8 bg-gradient-to-t from-black via-black/80 to-transparent opacity-0 hover:opacity-100 transition duration-500 flex items-end">
+            <div class="max-w-4xl pointer-events-auto">
+                <h2 class="text-3xl font-black mb-2">{{ $movie->title }}</h2>
+                @if($movie->description)
+                    <p class="text-gray-400 text-sm leading-relaxed">{{ $movie->description }}</p>
+                @endif
+            </div>
         </div>
-    </div>
+    @endif
 </div>
