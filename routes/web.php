@@ -1,6 +1,8 @@
 <?php
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 
 Route::livewire('/', 'pages::home')->name('home');
 Route::view('/about', 'about')->name('about');
@@ -12,6 +14,28 @@ Route::view('/terms-of-services', 'terms-of-services')->name('terms');
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::view('dashboard', 'dashboard')->name('dashboard');
 });
+
+Route::get('/api/video-key/{slug}', function (Request $request, $slug) {
+    // 1. Verify the movie exists
+    $movie = DB::table('movies')->where('slug', $slug)->first();
+    if (!$movie) abort(404);
+
+    // 2. Locate the key in your private local storage (NOT Backblaze)
+    // Assuming you saved it as 'storage/app/video_keys/movie-slug.key'
+    $keyPath = "video_keys/{$movie->slug}.key";
+
+    if (!Storage::disk('local')->exists($keyPath)) {
+        abort(404, 'Key not found.');
+    }
+
+    // 3. Serve the file securely with strict anti-caching
+    return response()->stream(function () use ($keyPath) {
+        echo Storage::disk('local')->get($keyPath);
+    }, 200, [
+        'Content-Type' => 'application/octet-stream',
+        'Cache-Control' => 'no-cache, no-store, must-revalidate',
+    ]);
+})->middleware(['auth', 'secure.video'])->name('video.key');
 
 Route::livewire('/watch/{slug}', 'pages::player')
     ->middleware(['auth', 'secure.video'])

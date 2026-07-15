@@ -123,7 +123,15 @@ class extends Component
 
             if (@js($isHLS)) {
                 if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-                    const hls = new Hls({ capLevelToPlayerSize: true });
+                    const hls = new Hls({
+                        capLevelToPlayerSize: true,
+                        // This ensures AES decryption keys fetch with Laravel Auth Cookies
+                        xhrSetup: function(xhr, url) {
+                            if (url.includes('/api/video-key/')) {
+                                xhr.withCredentials = true;
+                            }
+                        }
+                    });
                     hls.loadSource(src);
                     hls.attachMedia(video);
                 } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
