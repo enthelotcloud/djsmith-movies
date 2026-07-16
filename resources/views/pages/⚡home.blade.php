@@ -166,7 +166,7 @@ class extends Component
         @endif
 
         {{-- Content --}}
-        <div class="relative z-20 max-w-[1920px] mx-auto px-4 sm:px-6 lg:px-8 py-20 w-full">
+        <div class="relative z-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-20 w-full">
             <div class="max-w-4xl space-y-8">
 
                 {{-- Status Badge --}}
@@ -284,7 +284,7 @@ class extends Component
     </div>
 
     {{-- 📂 MAIN CONTENT --}}
-    <div id="browse" class="relative z-20 max-w-[1920px] mx-auto px-4 sm:px-6 lg:px-8 py-16 space-y-20">
+    <div id="browse" class="relative z-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 space-y-20">
 
         {{-- 🎯 LATEST RELEASES --}}
         @if($this->latestMovies->isNotEmpty())

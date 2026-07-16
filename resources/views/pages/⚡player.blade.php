@@ -80,25 +80,53 @@ class extends Component
 };
 ?>
 
-<div class="min-h-screen bg-black text-white relative overflow-hidden"
+<div class="fixed inset-0 z-50 bg-black text-white overflow-hidden"
      x-data="{
         ui: true,
         isPlaying: false,
         isBlurred: false,
         timer: null,
+        warningCount: 0,
+        maxWarnings: 3,
 
         init() {
-            // Block Right Click
-            document.addEventListener('contextmenu', e => e.preventDefault());
+            // ==========================================
+            // ANTI-PIRACY: Right Click Block
+            // ==========================================
+            document.addEventListener('contextmenu', e => {
+                e.preventDefault();
+                this.showWarning('Right-click is disabled to protect content.');
+            });
 
-            // Block DevTools
+            // ==========================================
+            // ANTI-PIRACY: DevTools & Keyboard Shortcuts Block
+            // ==========================================
             document.addEventListener('keydown', e => {
-                if(e.keyCode == 123 || (e.ctrlKey && e.shiftKey && (e.keyCode == 73 || e.keyCode == 74 || e.keyCode == 67)) || (e.ctrlKey && e.keyCode == 85)) {
+                if (e.keyCode === 123) {
                     e.preventDefault();
+                    this.showWarning('Developer tools are disabled.');
+                    return false;
+                }
+                if (e.ctrlKey && e.shiftKey && (e.keyCode === 73 || e.keyCode === 74 || e.keyCode === 67)) {
+                    e.preventDefault();
+                    this.showWarning('Developer tools are disabled.');
+                    return false;
+                }
+                if (e.ctrlKey && (e.keyCode === 85 || e.keyCode === 83 || e.keyCode === 80)) {
+                    e.preventDefault();
+                    this.showWarning('Action disabled.');
+                    return false;
+                }
+                if (e.keyCode === 44 || (e.metaKey && e.shiftKey && e.keyCode === 83)) {
+                    e.preventDefault();
+                    this.showWarning('Screenshots are disabled.');
+                    return false;
                 }
             });
 
-            // Anti-Screen Capture
+            // ==========================================
+            // ANTI-SCREEN CAPTURE: Visibility Change
+            // ==========================================
             document.addEventListener('visibilitychange', () => {
                 if (document.hidden && this.isPlaying) {
                     this.$refs.player.pause();
@@ -106,7 +134,19 @@ class extends Component
                 }
             });
 
-            // Dynamically load HLS.js to prevent race conditions
+            // ==========================================
+            // ANTI-SCREEN RECORDING: MediaRecorder Detection
+            // ==========================================
+            if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
+                navigator.mediaDevices.getDisplayMedia = () => {
+                    this.showWarning('Screen recording is not allowed.');
+                    return Promise.reject(new Error('Screen recording blocked'));
+                };
+            }
+
+            // ==========================================
+            // PLAYER SETUP
+            // ==========================================
             if (@js($isHLS)) {
                 if (typeof Hls === 'undefined') {
                     let script = document.createElement('script');
@@ -119,6 +159,43 @@ class extends Component
             } else {
                 this.setupPlayer();
             }
+
+            // Lock body scroll
+            document.body.style.overflow = 'hidden';
+            document.documentElement.style.overflow = 'hidden';
+        },
+
+        showWarning(message) {
+            this.warningCount++;
+            const warningEl = this.$refs.warning;
+            const warningText = this.$refs.warningText;
+
+            if (warningEl && warningText) {
+                warningText.textContent = message + ` (Warning ${this.warningCount}/${this.maxWarnings})`;
+                warningEl.classList.remove('opacity-0', 'translate-y-4');
+                warningEl.classList.add('opacity-100', 'translate-y-0');
+
+                setTimeout(() => {
+                    warningEl.classList.add('opacity-0', 'translate-y-4');
+                    warningEl.classList.remove('opacity-100', 'translate-y-0');
+                }, 3000);
+            }
+
+            if (this.warningCount >= this.maxWarnings) {
+                this.forceStop();
+            }
+        },
+
+        forceStop() {
+            if (this.isPlaying) {
+                this.$refs.player.pause();
+                this.$refs.player.currentTime = 0;
+            }
+            this.isPlaying = false;
+            this.isBlurred = true;
+            this.warningCount = 0;
+
+            alert('Streaming stopped due to multiple violation attempts. Please respect content protection policies.');
         },
 
         setupPlayer() {
@@ -141,7 +218,6 @@ class extends Component
                     hls.loadSource(src);
                     hls.attachMedia(video);
                 } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                    // iPhone Safari Native Fallback
                     video.src = src;
                 }
             } else {
@@ -156,16 +232,16 @@ class extends Component
             const container = this.$refs.container;
 
             try {
-                // 1. Enter Fullscreen (Required before rotation)
+                // 1. Enter Fullscreen
                 if (container.requestFullscreen) {
                     await container.requestFullscreen();
-                } else if (container.webkitRequestFullscreen) { /* Desktop Safari */
+                } else if (container.webkitRequestFullscreen) {
                     await container.webkitRequestFullscreen();
-                } else if (video.webkitEnterFullscreen) { /* iPhone Safari */
+                } else if (video.webkitEnterFullscreen) {
                     video.webkitEnterFullscreen();
                 }
 
-                // 2. Lock to Landscape (Android Chrome / Modern Browsers)
+                // 2. Lock to Landscape (Android/Chrome/Modern Browsers)
                 if (screen.orientation && screen.orientation.lock) {
                     await screen.orientation.lock('landscape');
                 }
@@ -173,7 +249,11 @@ class extends Component
                 console.warn('Orientation lock not supported on this OS/Browser.', err);
             }
 
-            video.play();
+            video.play().catch(e => {
+                console.error('Play failed:', e);
+                // Fallback: try again without fullscreen lock logic
+                video.play();
+            });
             this.hideUI();
         },
 
@@ -189,8 +269,24 @@ class extends Component
      @window.focus="isBlurred = false"
      wire:poll.30s="heartbeat">
 
-    {{-- The Player Container --}}
-    <div x-ref="container" class="absolute inset-0 flex items-center justify-center bg-black" wire:ignore>
+    {{-- Large Diagonal DRM Watermark Overlay --}}
+    <div class="pointer-events-none absolute inset-0 z-[5] flex items-center justify-center overflow-hidden">
+        <div class="text-[clamp(2rem,5vw,6rem)] font-black text-white/5 -rotate-[25deg] whitespace-nowrap tracking-[0.5em] select-none uppercase">
+            {{ Auth::user()->email ?? 'DJSMITH.CO.KE' }}
+        </div>
+    </div>
+
+    {{-- Anti-Piracy Warning Toast --}}
+    <div x-ref="warning"
+         class="fixed top-6 left-1/2 -translate-x-1/2 z-50 px-6 py-3 bg-red-600/95 backdrop-blur-md text-white font-bold text-sm rounded-xl shadow-2xl border border-red-400/30 transition-all duration-500 opacity-0 translate-y-4 pointer-events-none">
+        <span x-ref="warningText"></span>
+    </div>
+
+    {{-- Robust Player Container (from Version 2) --}}
+    <div x-ref="container"
+         class="absolute inset-0 flex items-center justify-center bg-black"
+         wire:ignore>
+
         <video
             x-ref="player"
             id="video-player"
@@ -199,26 +295,30 @@ class extends Component
             controls
             playsinline
             controlsList="nodownload noplaybackrate"
-            disablePictureInPicture>
+            disablePictureInPicture
+            oncontextmenu="return false;"
+            disableRemotePlayback>
         </video>
     </div>
 
     {{-- Cinematic "Tap to Play" Intro Screen --}}
-    <div x-show="!isPlaying" class="absolute inset-0 z-20 flex flex-col items-center justify-center bg-cover bg-center transition-opacity duration-700"
+    <div x-show="!isPlaying"
+         class="absolute inset-0 z-20 flex flex-col items-center justify-center bg-cover bg-center transition-opacity duration-700"
          style="background-image: url('{{ $thumbnailUrl ?: asset('logo.png') }}');">
 
         {{-- Heavy Dark Gradient Overlay for Readability --}}
         <div class="absolute inset-0 bg-gradient-to-t from-[#0a0a0a] via-[#0a0a0a]/80 to-transparent backdrop-blur-[2px]"></div>
 
-        <div class="relative z-30 flex flex-col items-center text-center px-6 mt-32 max-w-3xl">
+        <div class="relative z-30 flex flex-col items-center text-center px-6 mt-20 sm:mt-32 max-w-3xl">
             {{-- Big Play Button --}}
-            <button @click="startPlayback()" class="w-24 h-24 bg-red-600 hover:bg-red-500 text-white rounded-full flex items-center justify-center transition-all duration-300 shadow-[0_0_40px_rgba(220,38,38,0.5)] transform hover:scale-110">
+            <button @click="startPlayback()"
+                    class="w-20 h-20 sm:w-24 sm:h-24 bg-red-600 hover:bg-red-500 text-white rounded-full flex items-center justify-center transition-all duration-300 shadow-[0_0_40px_rgba(220,38,38,0.5)] transform hover:scale-110">
                 <svg class="w-10 h-10 ml-2" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
             </button>
             <p class="mt-6 text-slate-300 font-bold tracking-widest text-[10px] sm:text-xs uppercase drop-shadow-md">Tap to Stream</p>
 
             {{-- Movie Title & Metadata --}}
-            <h1 class="mt-8 text-4xl md:text-6xl font-black text-white drop-shadow-2xl leading-tight tracking-tight">
+            <h1 class="mt-6 sm:mt-8 text-4xl md:text-6xl font-black text-white drop-shadow-2xl leading-tight tracking-tight">
                 {{ $movie->title }}
             </h1>
 
@@ -236,7 +336,7 @@ class extends Component
             </div>
 
             @if($movie->excerpt)
-                <p class="mt-6 text-slate-400 text-sm md:text-base leading-relaxed drop-shadow max-w-2xl">
+                <p class="mt-4 sm:mt-6 text-slate-400 text-sm md:text-base leading-relaxed drop-shadow max-w-2xl line-clamp-3">
                     {{ $movie->excerpt }}
                 </p>
             @endif
@@ -248,13 +348,18 @@ class extends Component
          x-show="isPlaying"
          :class="ui ? 'opacity-100' : 'opacity-0'" x-cloak>
 
-        <div class="p-6">
-            <a href="{{ route('home') }}" wire:navigate class="pointer-events-auto inline-flex items-center gap-2 bg-black/50 px-4 py-2 rounded-full border border-white/10 text-sm font-bold backdrop-blur-md hover:bg-black/80 transition">
-                &larr; Back to Browse
+        <div class="p-4 sm:p-6">
+            <a href="{{ route('home') }}" wire:navigate
+               class="pointer-events-auto inline-flex items-center gap-2 bg-black/50 px-4 py-2 rounded-full border border-white/10 text-sm font-bold backdrop-blur-md hover:bg-black/80 transition shadow-lg">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                </svg>
+                Back to Browse
             </a>
         </div>
 
-        <div class="absolute bottom-10 right-10 opacity-20 select-none text-xs tracking-widest font-bold">
+        {{-- Session Info Watermark --}}
+        <div class="absolute bottom-6 right-6 sm:bottom-10 sm:right-10 opacity-20 select-none text-[10px] sm:text-xs tracking-widest font-bold pointer-events-none">
             STREAMING ON DJSMITH.CO.KE • {{ Auth::user()->name }}
         </div>
     </div>
