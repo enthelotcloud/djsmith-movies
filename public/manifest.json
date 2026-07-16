@@ -1,0 +1,18 @@
+{
+    "name": "Dj Smith Movies",
+    "short_name": "DjSmith",
+    "description": "Watch all your favourite Dj Smith Movies online for a monthly subscription.",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#000000",
+    "theme_color": "#dc2626",
+    "orientation": "portrait-primary",
+    "icons": [
+        {
+            "src": "/fav.png",
+            "sizes": "192x192 512x512",
+            "type": "image/png",
+            "purpose": "any maskable"
+        }
+    ]
+}
