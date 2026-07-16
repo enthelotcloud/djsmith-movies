@@ -136,7 +136,7 @@ new class extends Component
                     <a href="/" class="flex items-center gap-3 group shrink-0" wire:navigate>
                         <div class="relative">
                             <img
-                                src="{{ asset('images/logo.png') }}"
+                                src="{{ asset('logo.png') }}"
                                 alt="Dj Smith Movies"
                                 class="h-8 lg:h-10 w-auto transition-transform duration-300 group-hover:scale-105"
                                 onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
