@@ -150,7 +150,7 @@ class extends Component
         {{-- Featured Movie Background (if exists) --}}
         @if($randomFeatured && $randomFeatured->thumbnail_path)
             <div class="absolute inset-0">
-                <img src="{{ Storage::disk('b2')->temporaryUrl($randomFeatured->thumbnail_path, now()->addHours(2)) }}"
+                <img src="{{ Storage::disk('b2')->Url($randomFeatured->thumbnail_path, now()->addHours(2)) }}"
                      class="w-full h-full object-cover opacity-30 scale-110 blur-sm"
                      alt="">
                 <div class="absolute inset-0 bg-gradient-to-t from-black via-black/70 to-black/40"></div>

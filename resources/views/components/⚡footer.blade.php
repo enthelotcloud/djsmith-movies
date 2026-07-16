@@ -11,7 +11,7 @@ new class extends Component
 {{-- ⚠️ SINGLE ROOT ELEMENT --}}
 <div>
     <footer class="relative bg-black border-t border-gray-800/50">
-        <div class="max-w-[1920px] mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div class="py-8 lg:py-10">
                 {{-- Main Footer Content --}}
                 <div class="flex flex-col md:flex-row items-center justify-between gap-6">
