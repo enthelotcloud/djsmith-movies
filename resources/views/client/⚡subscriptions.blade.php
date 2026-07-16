@@ -196,28 +196,14 @@ new class extends Component {
 
             DB::commit();
 
-            // Success message
-            $this->modalType = 'success';
-            $this->modalMessage = 'Success! ' . $plan->name . ' activated. KES ' . number_format($price, 0) . ' deducted from wallet. Expires: ' . $newExpiry->format('M d, Y h:i A');
-            $this->showResultModal = true;
-            $this->confirmingPlanId = null;
-            unset($this->currentBalance, $this->activeSubscription, $this->purchaseLedger);
-
-            Log::info('Wallet purchase completed', [
-                'user_id' => $userId,
-                'plan' => $plan->name,
-                'amount' => $price
-            ]);
+            // SUCCESS REDIRECT
+            Log::info('Wallet purchase completed', ['user_id' => $userId, 'plan' => $plan->name]);
+            session()->flash('message', 'Success! ' . $plan->name . ' activated. Redirecting home...');
+            return redirect()->route('home');
 
         } catch (\Exception $e) {
             DB::rollBack();
-
-            Log::error('Wallet purchase failed', [
-                'user_id' => $userId,
-                'plan_id' => $planId,
-                'error' => $e->getMessage()
-            ]);
-
+            Log::error('Wallet purchase failed', ['user_id' => $userId, 'error' => $e->getMessage()]);
             $this->modalType = 'error';
             $this->modalMessage = $e->getMessage();
             $this->showResultModal = true;
@@ -272,10 +258,9 @@ new class extends Component {
         if (!$tx) return;
 
         if ($tx->status === 'completed') {
-            $this->modalType = 'success';
-            $this->modalMessage = 'Payment received! Your plan is now active.';
-            $this->showResultModal = true;
-            $this->resetCheckoutState();
+            // SUCCESS REDIRECT
+            session()->flash('message', 'Payment received! Your plan is now active. Redirecting home...');
+            return redirect()->route('home');
         } elseif ($tx->status === 'failed') {
             $this->modalType = 'error';
             $this->modalMessage = 'Payment failed: ' . ($tx->result_desc ?? 'Cancelled by user');
@@ -283,7 +268,6 @@ new class extends Component {
             $this->resetCheckoutState();
         } else {
             // Still pending after 20 seconds.
-            // We don't close the modal, we just show a subtle error and let them manually check again.
             $this->dispatch('notify-toast', type: 'warning', message: 'Still waiting for Safaricom. Did you enter your PIN?');
         }
 
@@ -305,7 +289,7 @@ new class extends Component {
 };
 ?>
 
-{{-- 🚨 REMOVED wire:poll entirely. This container is now static. --}}
+{{-- UI remains exactly as provided --}}
 <div class="max-w-6xl mx-auto space-y-8 relative" x-data @notify-toast.window="alert($event.detail.message)">
 
     {{-- ACTIVE PLAN BANNER --}}
@@ -398,7 +382,6 @@ new class extends Component {
             <div class="bg-[#111111] border border-slate-800 w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden p-6 text-center">
 
                 @if($this->isWaitingForMpesa)
-                    {{-- 🚨 THE ALPINE.JS COUNTDOWN COMPONENT 🚨 --}}
                     <div x-data="{
                             countdown: 20,
                             timer: null,
@@ -408,7 +391,7 @@ new class extends Component {
                                         this.countdown--;
                                     } else {
                                         clearInterval(this.timer);
-                                        $wire.verifyPaymentStatus(); // Server ping ONLY at 0
+                                        $wire.verifyPaymentStatus();
                                     }
                                 }, 1000);
                             }
@@ -427,7 +410,6 @@ new class extends Component {
                         <h3 class="text-xl font-bold text-white">Check Your Phone</h3>
                         <p class="text-sm text-slate-400">Please enter your M-Pesa PIN. We are waiting for Safaricom to process the payment.</p>
 
-                        {{-- Manual verify button appears when countdown hits 0 --}}
                         <div x-show="countdown === 0" x-transition.opacity class="pt-4 border-t border-slate-800">
                             <button wire:click="verifyPaymentStatus" wire:loading.attr="disabled" class="w-full py-3 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-slate-700 text-amber-500 font-bold transition flex justify-center items-center gap-2">
                                 <span wire:loading.remove wire:target="verifyPaymentStatus">Verify Payment Now</span>
@@ -436,7 +418,6 @@ new class extends Component {
                         </div>
                     </div>
                 @else
-                    {{-- NORMAL CHECKOUT VIEW --}}
                     <h2 class="text-xl font-bold text-white mb-1">Confirm Plan</h2>
                     <p class="text-sm text-slate-400 mb-5">You are selecting <strong class="text-white">{{ $this->confirmingPlan->name }}</strong></p>
 
@@ -474,7 +455,6 @@ new class extends Component {
                     @endif
                 @endif
 
-                {{-- The universal cancel button --}}
                 <button wire:click="closeModals" class="w-full mt-3 py-3.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-slate-800 text-slate-300 font-medium transition">
                     Cancel
                 </button>
