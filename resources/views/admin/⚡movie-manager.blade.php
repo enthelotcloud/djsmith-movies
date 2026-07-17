@@ -20,10 +20,8 @@ new class extends Component {
     public $searchResults = [];
     public $isSearching = false;
     public $tmdbError = '';
-    public $savePosterToB2 = true;
 
     // Form State
-    public $type = 'movie';
     public $title;
     public $description;
     public $selectedCategories = [];
@@ -37,6 +35,9 @@ new class extends Component {
     public $uploadMethod = 'link';
     public $manual_video_path = '';
     public $video;
+
+    // NEW: Encryption Key State
+    public $enc_key_upload;
 
     // Error tracking
     public $formErrors = [];
@@ -78,9 +79,9 @@ new class extends Component {
     {
         $this->reset([
             'editingId', 'title', 'description', 'selectedCategories', 'poster_path', 'poster_upload',
-            'manual_video_path', 'video', 'searchQuery', 'searchResults', 'tmdbError', 'formErrors'
+            'manual_video_path', 'video', 'searchQuery', 'searchResults', 'tmdbError', 'formErrors',
+            'enc_key_upload'
         ]);
-        $this->type = 'movie';
         $this->status = 'ready';
         $this->is_premium = true;
         $this->uploadMethod = 'link';
@@ -107,10 +108,9 @@ new class extends Component {
                 throw new \Exception('TMDB API token not configured');
             }
 
-            $endpoint = $this->type === 'series' ? 'search/tv' : 'search/movie';
             $response = Http::withToken(env('TMDB_BEARER_TOKEN'))
                 ->timeout(10)
-                ->get("https://api.themoviedb.org/3/{$endpoint}", [
+                ->get("https://api.themoviedb.org/3/search/movie", [
                     'query' => $this->searchQuery,
                     'include_adult' => false,
                 ]);
@@ -137,40 +137,24 @@ new class extends Component {
         try {
             if (!env('TMDB_BEARER_TOKEN')) throw new \Exception('TMDB API token not configured');
 
-            $endpoint = $this->type === 'series' ? 'tv' : 'movie';
             $response = Http::withToken(env('TMDB_BEARER_TOKEN'))
                 ->timeout(10)
-                ->get("https://api.themoviedb.org/3/{$endpoint}/{$tmdbId}");
+                ->get("https://api.themoviedb.org/3/movie/{$tmdbId}");
 
             if ($response->successful()) {
                 $media = $response->json();
-                $this->title = $this->type === 'series' ? ($media['name'] ?? '') : ($media['title'] ?? '');
+                $this->title = $media['title'] ?? '';
                 $this->description = $media['overview'] ?? '';
+                $this->duration_minutes = $media['runtime'] ?? 120;
 
                 if (isset($media['poster_path']) && $media['poster_path']) {
-                    $tmdbUrl = "https://image.tmdb.org/t/p/w780" . $media['poster_path'];
-
-                    if ($this->savePosterToB2) {
-                        try {
-                            $imageContent = Http::timeout(30)->get($tmdbUrl)->body();
-                            $filename = 'posters/' . Str::slug($this->title) . '-' . time() . '.jpg';
-
-                            if (Storage::disk('b2')->put($filename, $imageContent)) {
-                                $this->poster_path = $filename;
-                                $this->dispatch('notify-toast', type: 'success', message: 'Poster saved to B2 successfully!');
-                            }
-                        } catch (\Exception $e) {
-                            $this->poster_path = $tmdbUrl;
-                            $this->dispatch('notify-toast', type: 'warning', message: 'Could not save to B2, using TMDB URL instead');
-                        }
-                    } else {
-                        $this->poster_path = $tmdbUrl;
-                    }
+                    $this->poster_path = "https://image.tmdb.org/t/p/w780" . $media['poster_path'];
                 }
 
                 $this->poster_upload = null;
                 $this->searchResults = [];
                 $this->searchQuery = '';
+                unset($this->formErrors['poster_upload']);
             }
         } catch (\Exception $e) {
             $this->tmdbError = "Failed to fetch details: " . $e->getMessage();
@@ -187,7 +171,6 @@ new class extends Component {
             if (!$movie) throw new \Exception('Movie not found');
 
             $this->editingId = $movie->id;
-            $this->type = $movie->type ?? 'movie';
             $this->title = $movie->title;
             $this->description = $movie->description;
             $this->manual_video_path = $movie->video_path;
@@ -208,7 +191,6 @@ new class extends Component {
         }
     }
 
-    // Instantly catch if the user uploads a 10MB image instead of dying silently
     public function updatedPosterUpload()
     {
         try {
@@ -216,6 +198,9 @@ new class extends Component {
                 'poster_upload' => 'image|max:3072|mimes:jpg,jpeg,png,webp'
             ]);
             unset($this->formErrors['poster_upload']);
+            if ($this->poster_upload) {
+                $this->poster_path = null;
+            }
         } catch (\Illuminate\Validation\ValidationException $e) {
             $this->formErrors['poster_upload'] = $e->errors()['poster_upload'];
             $this->poster_upload = null;
@@ -230,86 +215,133 @@ new class extends Component {
         try {
             $this->validate([
                 'title' => 'required|min:1|max:255',
-                'type' => 'required|in:movie,series',
+                'description' => 'required|string|min:10',
                 'selectedCategories' => 'required|array|min:1',
+                'duration_minutes' => 'required|integer|min:1',
+                'status' => 'required|in:ready,hidden',
+                'is_premium' => 'boolean',
                 'poster_upload' => 'nullable|image|max:3072|mimes:jpg,jpeg,png,webp',
                 'manual_video_path' => 'nullable|string|max:500',
                 'video' => 'nullable|file|max:2048000',
+                'enc_key_upload' => 'nullable|file|max:2048', // Allow up to 2MB for the key file
             ]);
         } catch (\Illuminate\Validation\ValidationException $e) {
             $this->formErrors = $e->errors();
-            $this->dispatch('notify-toast', type: 'error', message: 'Please fix the validation errors');
-            throw $e;
+            $this->dispatch('notify-toast', type: 'error', message: 'Please fix the validation errors below.');
+            return;
         }
 
         try {
             DB::beginTransaction();
 
-            // 1. Process custom poster upload first
+            // ==========================================
+            // STEP 1: Determine the Final Slug FIRST
+            // ==========================================
+            $slug = '';
+            $existingEncKey = null;
+
+            if ($this->editingId) {
+                $existingMovie = DB::table('movies')->where('id', $this->editingId)->first();
+                $slug = $existingMovie->slug ?? Str::slug($this->title) . '-' . uniqid();
+                $existingEncKey = $existingMovie->enc_key; // Keep existing key path if not replaced
+            } else {
+                $slug = Str::slug($this->title) . '-' . uniqid();
+            }
+
+            // ==========================================
+            // STEP 2: Process the Encryption Key Upload
+            // ==========================================
+            $encKeyPath = $existingEncKey;
+
+            if ($this->enc_key_upload) {
+                // Rename it strictly to {slug}.key
+                $keyFilename = $slug . '.key';
+
+                // Save it specifically to storage/app/video_keys (using the default 'local' disk)
+                $storedKey = $this->enc_key_upload->storeAs('video_keys', $keyFilename, 'local');
+
+                if (!$storedKey) {
+                    throw new \Exception('Failed to store encryption key locally.');
+                }
+
+                $encKeyPath = 'video_keys/' . $keyFilename;
+            }
+
+            // ==========================================
+            // STEP 3: Process the Poster Upload
+            // ==========================================
             if ($this->poster_upload) {
                 $filename = 'posters/' . Str::slug($this->title) . '-' . time() . '.' . $this->poster_upload->getClientOriginalExtension();
-                $stored = $this->poster_upload->storeAs('posters', $filename, 'b2');
+                $stored = $this->poster_upload->storeAs('posters', $filename, 'public');
 
-                if (!$stored) throw new \Exception('Failed to store poster on B2');
-
+                if (!$stored) throw new \Exception('Failed to store poster locally.');
                 $this->poster_path = $filename;
             }
 
             if (!$this->poster_path && !$this->poster_upload) {
+                $this->formErrors['poster_upload'] = ['A movie poster is required. Upload one or select via TMDB.'];
                 throw new \Exception('A poster image is required');
             }
 
-            // 2. Prepare Data (Removed the ghost 'thumbnail_path' column!)
+            // ==========================================
+            // STEP 4: Build Database Payload
+            // ==========================================
             $data = [
-                'type' => $this->type,
                 'title' => $this->title,
-                'slug' => Str::slug($this->title) . '-' . uniqid(),
+                'slug' => $slug,
                 'description' => $this->description,
-                'thumbnail' => $this->poster_path, // ONLY use thumbnail
-                'duration_in_seconds' => ($this->duration_minutes ?? 0) * 60,
+                'thumbnail' => $this->poster_path,
+                'duration_in_seconds' => (int) $this->duration_minutes * 60,
                 'is_premium' => $this->is_premium,
                 'status' => $this->status,
+                'type' => 'movie',
+                'video_disk' => 'b2',
+                'enc_key' => $encKeyPath, // Save the new key path to the database
                 'updated_at' => now(),
             ];
 
-            if ($this->type === 'movie') {
-                $data['video_disk'] = 'b2';
-
-                if ($this->uploadMethod === 'file' && $this->video) {
-                    $videoPath = $this->video->storeAs('movies/' . Str::slug($this->title), $this->video->getClientOriginalName(), 'b2');
-                    if (!$videoPath) throw new \Exception('Failed to upload video to B2');
-                    $data['video_path'] = $videoPath;
-                } elseif (!empty($this->manual_video_path)) {
-                    $data['video_path'] = $this->manual_video_path;
-                }
+            // ==========================================
+            // STEP 5: Process Video Source
+            // ==========================================
+            if ($this->uploadMethod === 'file' && $this->video) {
+                $videoPath = $this->video->storeAs('movies/' . Str::slug($this->title), $this->video->getClientOriginalName(), 'b2');
+                if (!$videoPath) throw new \Exception('Failed to upload video to B2');
+                $data['video_path'] = $videoPath;
+            } elseif (!empty($this->manual_video_path)) {
+                $data['video_path'] = $this->manual_video_path;
             }
 
-            // 3. Save to Database
+            // ==========================================
+            // STEP 6: Commit to Database
+            // ==========================================
             if ($this->editingId) {
                 DB::table('movies')->where('id', $this->editingId)->update($data);
                 $movieId = $this->editingId;
-                $this->dispatch('notify-toast', type: 'success', message: 'Updated successfully!');
             } else {
                 $data['created_at'] = now();
                 $movieId = DB::table('movies')->insertGetId($data);
-                $this->dispatch('notify-toast', type: 'success', message: 'Saved to catalog!');
             }
 
-            // 4. Update Categories
             DB::table('category_movie')->where('movie_id', $movieId)->delete();
             $pivotData = [];
             foreach($this->selectedCategories as $catId) {
-                $pivotData[] = ['movie_id' => $movieId, 'moviecategory_id' => $catId, 'created_at' => now(), 'updated_at' => now()];
+                $pivotData[] = [
+                    'movie_id' => $movieId,
+                    'moviecategory_id' => $catId
+                ];
             }
             DB::table('category_movie')->insert($pivotData);
 
             DB::commit();
+
+            $this->dispatch('notify-toast', type: 'success', message: $this->editingId ? 'Movie updated successfully!' : 'Movie published to catalog!');
             $this->showList();
 
         } catch (\Exception $e) {
             DB::rollBack();
+            Log::error('Movie Save Error: ' . $e->getMessage());
             if (empty($this->formErrors)) {
-                $this->dispatch('notify-toast', type: 'error', message: 'Failed to save: ' . $e->getMessage());
+                $this->dispatch('notify-toast', type: 'error', message: 'Save Failed! Check application logs.');
             }
         }
     }
@@ -323,7 +355,7 @@ new class extends Component {
             DB::commit();
 
             unset($this->movies);
-            $this->dispatch('notify-toast', type: 'success', message: 'Deleted from database.');
+            $this->dispatch('notify-toast', type: 'success', message: 'Movie deleted from database.');
         } catch (\Exception $e) {
             DB::rollBack();
             $this->dispatch('notify-toast', type: 'error', message: 'Failed to delete: ' . $e->getMessage());
@@ -337,10 +369,10 @@ new class extends Component {
     <div class="flex justify-between items-center bg-[#111111] border border-slate-800 p-6 rounded-2xl shadow-lg">
         <div>
             <h1 class="text-3xl font-black text-white">Movie Studio</h1>
-            <p class="text-slate-400 mt-1 text-sm">Manage your VOD catalog and Backblaze storage.</p>
+            <p class="text-slate-400 mt-1 text-sm">Manage your VOD catalog.</p>
         </div>
         @if($currentView === 'list')
-            <button wire:click="showCreateForm" class="px-6 py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold transition shadow-sm active:scale-95">+ Add Content</button>
+            <button wire:click="showCreateForm" class="px-6 py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold transition shadow-sm active:scale-95">+ Add Movie</button>
         @else
             <button wire:click="showList" class="px-6 py-3 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-slate-700 text-white font-bold transition shadow-sm">← Back to Catalog</button>
         @endif
@@ -363,18 +395,22 @@ new class extends Component {
                             <tr class="hover:bg-zinc-900/50 transition-colors">
                                 <td class="px-6 py-4 flex items-center gap-4">
                                     @if($movie->thumbnail)
-                                        <img src="{{ str_starts_with($movie->thumbnail, 'http') ? $movie->thumbnail : Storage::disk('b2')->url($movie->thumbnail) }}" class="w-10 h-14 object-cover rounded shadow border border-slate-700" alt="{{ $movie->title }}">
+                                        <img src="{{ str_starts_with($movie->thumbnail, 'http') ? $movie->thumbnail : Storage::disk('public')->url($movie->thumbnail) }}" class="w-10 h-14 object-cover rounded shadow border border-slate-700" alt="{{ $movie->title }}">
                                     @else
                                         <div class="w-10 h-14 bg-zinc-800 rounded flex items-center justify-center text-[8px]">No Img</div>
                                     @endif
                                     <div>
                                         <div class="font-bold text-white text-base flex items-center gap-2">
                                             {{ $movie->title }}
-                                            <span class="px-1.5 py-0.5 rounded bg-zinc-800 text-slate-400 text-[9px] uppercase tracking-wider">{{ $movie->type }}</span>
                                         </div>
-                                        <span class="text-[10px] font-bold {{ $movie->is_premium ? 'text-amber-500' : 'text-emerald-500' }} uppercase tracking-wider">
-                                            {{ $movie->is_premium ? 'Premium Plan' : 'Free' }}
-                                        </span>
+                                        <div class="flex items-center gap-2 mt-1">
+                                            <span class="text-[10px] font-bold {{ $movie->is_premium ? 'text-amber-500' : 'text-emerald-500' }} uppercase tracking-wider">
+                                                {{ $movie->is_premium ? 'Premium Plan' : 'Free' }}
+                                            </span>
+                                            @if($movie->enc_key)
+                                                <span class="px-1.5 py-0.5 rounded bg-blue-950 text-blue-400 text-[8px] uppercase tracking-wider font-bold border border-blue-900/50" title="Encryption Key Enabled">Encrypted</span>
+                                            @endif
+                                        </div>
                                     </div>
                                 </td>
                                 <td class="px-6 py-4">
@@ -391,32 +427,23 @@ new class extends Component {
                                 </td>
                                 <td class="px-6 py-4 text-right space-x-3">
                                     <button wire:click="edit({{ $movie->id }})" class="text-indigo-400 hover:text-indigo-300 font-bold transition">Edit</button>
-                                    <button wire:click="delete({{ $movie->id }})" wire:confirm="Delete this asset?" class="text-red-500 hover:text-red-400 font-bold transition">Delete</button>
+                                    <button wire:click="delete({{ $movie->id }})" wire:confirm="Delete this movie?" class="text-red-500 hover:text-red-400 font-bold transition">Delete</button>
                                 </td>
                             </tr>
                         @empty
-                            <tr><td colspan="4" class="px-6 py-12 text-center text-slate-500 italic">No content found in the catalog.</td></tr>
+                            <tr><td colspan="4" class="px-6 py-12 text-center text-slate-500 italic">No movies found in the catalog.</td></tr>
                         @endforelse
                     </tbody>
                 </table>
             </div>
         </div>
     @else
-        <div class="flex items-center gap-4 mb-6">
-            <button wire:click="$set('type', 'movie')" class="flex-1 py-3 rounded-xl font-bold transition border {{ $type === 'movie' ? 'bg-red-600 border-red-500 text-white shadow-lg' : 'bg-black border-slate-800 text-slate-400 hover:text-white' }}">Standalone Movie</button>
-            <button wire:click="$set('type', 'series')" class="flex-1 py-3 rounded-xl font-bold transition border {{ $type === 'series' ? 'bg-indigo-600 border-indigo-500 text-white shadow-lg' : 'bg-black border-slate-800 text-slate-400 hover:text-white' }}">TV Series</button>
-        </div>
-
         @if(!$editingId)
             <div class="bg-black border border-slate-800 rounded-2xl shadow-lg p-6 mb-8">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg font-bold text-white">1. Auto-Fill Metadata</h3>
-                    <label class="flex items-center gap-2 cursor-pointer text-xs font-bold text-slate-400">
-                        <input type="checkbox" wire:model.live="savePosterToB2" class="rounded bg-zinc-900 text-red-600 border-slate-700">
-                        Auto-Store Poster to B2
-                    </label>
+                    <h3 class="text-lg font-bold text-white">1. Auto-Fill via TMDB (Optional)</h3>
                 </div>
-                <input type="text" wire:model.live.debounce.500ms="searchQuery" placeholder="Search for {{ $type }}..." class="w-full bg-[#111111] border border-slate-700 rounded-xl px-4 py-4 text-white focus:ring-1 focus:ring-red-600">
+                <input type="text" wire:model.live.debounce.500ms="searchQuery" placeholder="Search TMDB for a movie..." class="w-full bg-[#111111] border border-slate-700 rounded-xl px-4 py-4 text-white focus:ring-1 focus:ring-red-600">
 
                 @if($tmdbError)
                     <div class="mt-4 p-3 bg-red-950/30 border border-red-800 rounded-lg text-red-400 text-sm">{{ $tmdbError }}</div>
@@ -426,13 +453,13 @@ new class extends Component {
                     <div class="grid grid-cols-2 md:grid-cols-6 gap-4 mt-6">
                         @foreach($searchResults as $result)
                             <div wire:click="selectMovie({{ $result['id'] }})" class="cursor-pointer group">
-                                <div class="relative aspect-[2/3] overflow-hidden rounded-lg">
+                                <div class="relative aspect-[2/3] overflow-hidden rounded-lg bg-zinc-900 border border-slate-800">
                                     @if(isset($result['poster_path']))
-                                        <img src="https://image.tmdb.org/t/p/w200{{ $result['poster_path'] }}" class="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition" alt="{{ $result['title'] ?? $result['name'] ?? 'Poster' }}">
+                                        <img src="https://image.tmdb.org/t/p/w200{{ $result['poster_path'] }}" class="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition" alt="{{ $result['title'] ?? 'Poster' }}">
                                     @endif
                                     <div class="absolute inset-0 bg-red-600/0 group-hover:bg-red-600/20 transition"></div>
                                 </div>
-                                <div class="mt-2 text-[11px] font-bold text-slate-400 truncate group-hover:text-white">{{ $result['title'] ?? $result['name'] }}</div>
+                                <div class="mt-2 text-[11px] font-bold text-slate-400 truncate group-hover:text-white">{{ $result['title'] ?? 'Unknown' }}</div>
                             </div>
                         @endforeach
                     </div>
@@ -444,6 +471,7 @@ new class extends Component {
             <form wire:submit="saveMovie" class="space-y-6">
 
                 <div class="grid grid-cols-1 md:grid-cols-4 gap-8">
+                    <!-- POSTER PREVIEW PANEL WITH PROGRESS -->
                     <div class="col-span-1 space-y-4"
                          x-data="{ isUploading: false, progress: 0 }"
                          x-on:livewire-upload-start="isUploading = true"
@@ -453,48 +481,53 @@ new class extends Component {
 
                         <label class="block text-xs font-bold text-slate-500 uppercase tracking-widest">Poster Preview</label>
 
-                        <div class="relative w-full aspect-[2/3] rounded-xl overflow-hidden bg-black border border-slate-800 shadow-2xl flex items-center justify-center">
+                        <div class="relative w-full aspect-[2/3] rounded-xl overflow-hidden bg-black border {{ isset($formErrors['poster_upload']) ? 'border-red-500' : 'border-slate-800' }} shadow-2xl flex items-center justify-center">
                             @if($poster_upload)
                                 <img src="{{ $poster_upload->temporaryUrl() }}" class="w-full h-full object-cover" alt="Poster preview">
                                 <div class="absolute inset-0 border-2 border-red-600 rounded-xl"></div>
                             @elseif($poster_path)
-                                <img src="{{ str_starts_with($poster_path, 'http') ? $poster_path : Storage::disk('b2')->url($poster_path) }}" class="w-full h-full object-cover" alt="Poster preview">
+                                <img src="{{ str_starts_with($poster_path, 'http') ? $poster_path : Storage::disk('public')->url($poster_path) }}" class="w-full h-full object-cover" alt="Poster preview">
                             @else
                                 <span class="text-slate-800 font-black text-2xl uppercase italic">No File</span>
                             @endif
 
                             <div x-show="isUploading" class="absolute inset-0 bg-black/90 flex flex-col items-center justify-center p-4" style="display: none;">
-                                <div class="text-red-600 font-bold text-xs mb-2 italic">UPLOADING...</div>
-                                <div class="w-full bg-zinc-800 h-1.5 rounded-full overflow-hidden">
-                                    <div class="bg-red-600 h-full transition-all" :style="'width: ' + progress + '%'"></div>
+                                <div class="text-red-600 font-bold text-xs mb-2 italic">UPLOADING IMAGE...</div>
+                                <div class="w-full bg-zinc-800 h-2 rounded-full overflow-hidden mt-2">
+                                    <div class="bg-red-600 h-full transition-all duration-300" :style="'width: ' + progress + '%'"></div>
                                 </div>
                             </div>
                         </div>
 
-                        <div class="pt-2">
+                        <div class="pt-2 relative">
+                            <!-- This input is correctly scoped to bubble the upload progress events to the Alpine container above -->
                             <input type="file" wire:model="poster_upload" id="poster_upload" class="sr-only" accept="image/png, image/jpeg, image/jpg, image/webp">
                             <label for="poster_upload" class="block w-full text-center py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-white text-xs font-bold border border-slate-700 cursor-pointer transition">
-                                Upload New Image
+                                Upload Local Image
                             </label>
 
                             @if(isset($formErrors['poster_upload']))
                                 <p class="text-[10px] text-red-500 font-bold mt-2 text-center leading-tight">{{ $formErrors['poster_upload'][0] }}</p>
-                            @elseif($poster_path && !str_starts_with($poster_path, 'http'))
-                                <p class="text-[9px] text-emerald-500 font-bold mt-2 text-center uppercase tracking-tighter">✓ Stored on B2</p>
+                            @elseif($poster_path && str_starts_with($poster_path, 'http'))
+                                <p class="text-[9px] text-emerald-500 font-bold mt-2 text-center uppercase tracking-tighter">✓ Loaded from TMDB</p>
                             @endif
                         </div>
                     </div>
 
-                    <div class="col-span-1 md:col-span-3 space-y-4">
+                    <!-- METADATA PANEL -->
+                    <div class="col-span-1 md:col-span-3 space-y-5">
                         <div>
-                            <input type="text" wire:model="title" placeholder="Entry Title" class="w-full bg-black border {{ isset($formErrors['title']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-white text-lg font-bold">
-                            @if(isset($formErrors['title'])) <p class="text-red-500 text-xs mt-1">{{ $formErrors['title'][0] }}</p> @endif
+                            <input type="text" wire:model="title" placeholder="Movie Title" class="w-full bg-black border {{ isset($formErrors['title']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-white text-lg font-bold">
+                            @if(isset($formErrors['title'])) <p class="text-red-500 text-xs mt-1 font-bold">{{ $formErrors['title'][0] }}</p> @endif
                         </div>
 
-                        <textarea wire:model="description" rows="4" placeholder="Synopsis..." class="w-full bg-black border border-slate-700 rounded-xl px-4 py-3 text-slate-300"></textarea>
+                        <div>
+                            <textarea wire:model="description" rows="4" placeholder="Synopsis..." class="w-full bg-black border {{ isset($formErrors['description']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-slate-300"></textarea>
+                            @if(isset($formErrors['description'])) <p class="text-red-500 text-xs mt-1 font-bold">{{ $formErrors['description'][0] }}</p> @endif
+                        </div>
 
-                        <div class="bg-black border border-slate-800 rounded-xl p-4">
-                            <label class="block text-xs font-bold text-slate-500 mb-3 uppercase tracking-widest">Category Taxonomy</label>
+                        <div class="bg-black border {{ isset($formErrors['selectedCategories']) ? 'border-red-500' : 'border-slate-800' }} rounded-xl p-4">
+                            <label class="block text-xs font-bold text-slate-500 mb-3 uppercase tracking-widest">Movie Categories</label>
                             <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
                                 @foreach($this->categories as $cat)
                                     <label class="flex items-center gap-2 cursor-pointer text-slate-400 hover:text-white">
@@ -503,65 +536,115 @@ new class extends Component {
                                     </label>
                                 @endforeach
                             </div>
-                            @if(isset($formErrors['selectedCategories'])) <p class="text-red-500 text-xs mt-2">{{ $formErrors['selectedCategories'][0] }}</p> @endif
+                            @if(isset($formErrors['selectedCategories'])) <p class="text-red-500 text-xs mt-2 font-bold">{{ $formErrors['selectedCategories'][0] }}</p> @endif
                         </div>
 
-                        <div class="grid grid-cols-2 gap-4">
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 border-t border-slate-800 pt-5">
+                            <div>
+                                <label class="block text-[10px] font-bold text-slate-500 uppercase mb-2">Duration (Minutes)</label>
+                                <input type="number" wire:model="duration_minutes" placeholder="120" class="w-full bg-black border {{ isset($formErrors['duration_minutes']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-white text-sm">
+                                @if(isset($formErrors['duration_minutes'])) <p class="text-red-500 text-xs mt-1 font-bold">{{ $formErrors['duration_minutes'][0] }}</p> @endif
+                            </div>
+
                             <div>
                                 <label class="block text-[10px] font-bold text-slate-500 uppercase mb-2">Publish Status</label>
-                                <select wire:model="status" class="w-full bg-black border border-slate-700 rounded-xl px-4 py-3 text-white text-sm">
+                                <select wire:model="status" class="w-full bg-black border {{ isset($formErrors['status']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-white text-sm">
                                     <option value="ready">Live / Ready</option>
                                     <option value="hidden">Hidden / Draft</option>
                                 </select>
+                                @if(isset($formErrors['status'])) <p class="text-red-500 text-xs mt-1 font-bold">{{ $formErrors['status'][0] }}</p> @endif
                             </div>
-                            <div class="flex items-center pt-6">
+
+                            <div class="flex items-center pt-8">
                                 <label class="flex items-center gap-3 cursor-pointer text-white">
                                     <input type="checkbox" wire:model="is_premium" class="rounded bg-black text-red-600 border-slate-700">
-                                    <span class="text-xs font-bold uppercase tracking-widest text-amber-500">Premium Content</span>
+                                    <span class="text-xs font-bold uppercase tracking-widest text-amber-500">Premium Video</span>
                                 </label>
+                                @if(isset($formErrors['is_premium'])) <p class="text-red-500 text-xs mt-1 font-bold">{{ $formErrors['is_premium'][0] }}</p> @endif
                             </div>
                         </div>
                     </div>
                 </div>
 
-                @if($type === 'movie')
-                    <div class="pt-8 border-t border-slate-800">
-                        <div class="flex items-center justify-between mb-4">
-                            <h3 class="text-sm font-black text-white uppercase tracking-widest">Video Stream Asset</h3>
-                            <div class="bg-black border border-slate-800 rounded-lg p-1 flex">
-                                <button type="button" wire:click="$set('uploadMethod', 'link')" class="px-4 py-1.5 text-[10px] font-black rounded-md {{ $uploadMethod === 'link' ? 'bg-zinc-800 text-white' : 'text-slate-500' }}">DIRECT LINK / PATH</button>
-                                <button type="button" wire:click="$set('uploadMethod', 'file')" class="px-4 py-1.5 text-[10px] font-black rounded-md {{ $uploadMethod === 'file' ? 'bg-zinc-800 text-white' : 'text-slate-500' }}">FILE UPLOAD</button>
+                <!-- MEDIA UPLOADS (VIDEO & KEY) -->
+                <div class="pt-8 border-t border-slate-800">
+                    <h3 class="text-sm font-black text-white uppercase tracking-widest mb-4">Stream Assets</h3>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+                        <!-- VIDEO SOURCE PANEL -->
+                        <div class="bg-black border border-slate-800 rounded-xl p-5">
+                            <div class="flex justify-between items-center mb-4">
+                                <label class="block text-[10px] font-bold text-slate-500 uppercase">Video Source</label>
+                                <div class="bg-[#111111] border border-slate-800 rounded-lg p-1 flex">
+                                    <button type="button" wire:click="$set('uploadMethod', 'link')" class="px-3 py-1 text-[9px] font-black rounded-md {{ $uploadMethod === 'link' ? 'bg-zinc-800 text-white' : 'text-slate-500' }}">LINK/PATH</button>
+                                    <button type="button" wire:click="$set('uploadMethod', 'file')" class="px-3 py-1 text-[9px] font-black rounded-md {{ $uploadMethod === 'file' ? 'bg-zinc-800 text-white' : 'text-slate-500' }}">UPLOAD B2</button>
+                                </div>
                             </div>
+
+                            @if($uploadMethod === 'link')
+                                <input type="text" wire:model="manual_video_path" placeholder="e.g. movies/john-wick/playlist.m3u8" class="w-full bg-[#111111] border {{ isset($formErrors['manual_video_path']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 font-mono text-sm text-red-400">
+                                @if(isset($formErrors['manual_video_path'])) <p class="text-red-500 text-xs mt-2 font-bold">{{ $formErrors['manual_video_path'][0] }}</p> @endif
+                            @else
+                                <div x-data="{ isUploading: false, progress: 0 }"
+                                     x-on:livewire-upload-start="isUploading = true"
+                                     x-on:livewire-upload-finish="isUploading = false"
+                                     x-on:livewire-upload-error="isUploading = false"
+                                     x-on:livewire-upload-progress="progress = $event.detail.progress"
+                                     class="space-y-4">
+                                    <input type="file" wire:model="video" class="w-full bg-[#111111] text-slate-400 p-3 border border-dashed {{ isset($formErrors['video']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl cursor-pointer hover:border-red-600 transition text-sm">
+
+                                    <div x-show="isUploading" class="mt-2" style="display: none;">
+                                        <div class="flex justify-between text-[10px] font-black text-slate-400 mb-1 italic">
+                                            <span>UPLOADING TO BACKBLAZE...</span>
+                                            <span x-text="progress + '%'"></span>
+                                        </div>
+                                        <div class="w-full bg-zinc-900 h-1.5 rounded-full overflow-hidden">
+                                            <div class="bg-red-600 h-full transition-all duration-300" :style="'width: ' + progress + '%'"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                @if(isset($formErrors['video'])) <p class="text-red-500 text-xs mt-2 font-bold">{{ $formErrors['video'][0] }}</p> @endif
+                            @endif
                         </div>
 
-                        @if($uploadMethod === 'link')
-                            <input type="text" wire:model="manual_video_path" placeholder="e.g. movies/john-wick/playlist.m3u8" class="w-full bg-black border border-slate-700 rounded-xl px-4 py-4 font-mono text-sm text-red-400">
-                        @else
+                        <!-- ENCRYPTION KEY PANEL -->
+                        <div class="bg-black border border-slate-800 rounded-xl p-5">
+                            <label class="block text-[10px] font-bold text-slate-500 uppercase mb-4 flex justify-between items-center">
+                                Encryption Key (.key)
+                                <span class="text-[9px] font-normal text-slate-600 italic normal-case">Will auto-rename to {slug}.key</span>
+                            </label>
+
                             <div x-data="{ isUploading: false, progress: 0 }"
                                  x-on:livewire-upload-start="isUploading = true"
                                  x-on:livewire-upload-finish="isUploading = false"
                                  x-on:livewire-upload-error="isUploading = false"
-                                 x-on:livewire-upload-progress="progress = $event.detail.progress"
-                                 class="space-y-4">
-                                <input type="file" wire:model="video" class="w-full bg-black text-slate-400 p-4 border border-dashed border-slate-800 rounded-xl cursor-pointer hover:border-red-600 transition">
+                                 x-on:livewire-upload-progress="progress = $event.detail.progress">
 
-                                <div x-show="isUploading" class="p-6 bg-zinc-950 border border-slate-800 rounded-xl" style="display: none;">
-                                    <div class="flex justify-between text-xs font-black text-white mb-3 italic">
-                                        <span>UPLOADING RAW VIDEO TO BACKBLAZE B2...</span>
+                                <input type="file" wire:model="enc_key_upload" accept=".key" class="w-full text-xs text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-blue-950 file:text-blue-500 hover:file:bg-blue-900 cursor-pointer transition">
+
+                                <div x-show="isUploading" class="mt-3" style="display: none;">
+                                    <div class="flex justify-between text-[10px] font-black text-slate-400 mb-1 italic">
+                                        <span>SECURING KEY...</span>
                                         <span x-text="progress + '%'"></span>
                                     </div>
-                                    <div class="w-full bg-black h-3 rounded-full overflow-hidden border border-slate-800">
-                                        <div class="bg-red-600 h-full transition-all duration-300" :style="'width: ' + progress + '%'"></div>
+                                    <div class="w-full bg-zinc-900 h-1.5 rounded-full overflow-hidden">
+                                        <div class="bg-blue-500 h-full transition-all duration-300" :style="'width: ' + progress + '%'"></div>
                                     </div>
                                 </div>
                             </div>
-                        @endif
-                        @if(isset($formErrors['video'])) <p class="text-red-500 text-xs mt-2">{{ $formErrors['video'][0] }}</p> @endif
-                    </div>
-                @endif
+                            @if(isset($formErrors['enc_key_upload'])) <p class="text-red-500 text-xs mt-2 font-bold">{{ $formErrors['enc_key_upload'][0] }}</p> @endif
 
-                <button type="submit" class="w-full py-5 rounded-2xl {{ $type === 'series' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-red-600 hover:bg-red-700' }} text-white font-black text-xl transition shadow-2xl active:scale-[0.99]">
-                    {{ $editingId ? 'COMMIT CHANGES' : 'PUBLISH TO CATALOG' }}
+                            @if($editingId && DB::table('movies')->where('id', $editingId)->value('enc_key'))
+                                <p class="text-[9px] text-emerald-500 font-bold mt-3 uppercase tracking-wider">✓ Secure Key Active in Database</p>
+                            @endif
+                        </div>
+
+                    </div>
+                </div>
+
+                <button type="submit" class="w-full py-5 rounded-2xl bg-red-600 hover:bg-red-700 text-white font-black text-xl transition shadow-2xl active:scale-[0.99]">
+                    {{ $editingId ? 'COMMIT CHANGES' : 'PUBLISH MOVIE' }}
                 </button>
             </form>
         </div>
