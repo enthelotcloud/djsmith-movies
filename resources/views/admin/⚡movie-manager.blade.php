@@ -23,7 +23,9 @@ new class extends Component {
 
     // Form State
     public $title;
+    public $slug;
     public $description;
+    public $excerpt;
     public $selectedCategories = [];
     public $poster_path;
     public $poster_upload;
@@ -36,8 +38,8 @@ new class extends Component {
     public $manual_video_path = '';
     public $video;
 
-    // NEW: Encryption Key State
-    public $enc_key_upload;
+    // NEW: Base64 String for the Encryption Key
+    public $enc_key_base64;
 
     // Error tracking
     public $formErrors = [];
@@ -78,14 +80,28 @@ new class extends Component {
     public function resetForm()
     {
         $this->reset([
-            'editingId', 'title', 'description', 'selectedCategories', 'poster_path', 'poster_upload',
+            'editingId', 'title', 'slug', 'description', 'excerpt', 'selectedCategories', 'poster_path', 'poster_upload',
             'manual_video_path', 'video', 'searchQuery', 'searchResults', 'tmdbError', 'formErrors',
-            'enc_key_upload'
+            'enc_key_base64'
         ]);
         $this->status = 'ready';
         $this->is_premium = true;
         $this->uploadMethod = 'link';
         $this->duration_minutes = 120;
+    }
+
+    public function updatedTitle($value)
+    {
+        if (!$this->editingId) {
+            $this->slug = Str::slug($value) . '-' . substr(uniqid(), -5);
+        }
+    }
+
+    public function updatedDescription($value)
+    {
+        if (empty($this->excerpt)) {
+            $this->excerpt = Str::limit($value, 160);
+        }
     }
 
     public function updatedSearchQuery($value)
@@ -143,8 +159,15 @@ new class extends Component {
 
             if ($response->successful()) {
                 $media = $response->json();
+
                 $this->title = $media['title'] ?? '';
                 $this->description = $media['overview'] ?? '';
+
+                $this->excerpt = Str::limit($this->description, 160);
+                if (!$this->editingId) {
+                    $this->slug = Str::slug($this->title) . '-' . substr(uniqid(), -5);
+                }
+
                 $this->duration_minutes = $media['runtime'] ?? 120;
 
                 if (isset($media['poster_path']) && $media['poster_path']) {
@@ -172,7 +195,9 @@ new class extends Component {
 
             $this->editingId = $movie->id;
             $this->title = $movie->title;
+            $this->slug = $movie->slug;
             $this->description = $movie->description;
+            $this->excerpt = $movie->excerpt ?? Str::limit($movie->description, 160);
             $this->manual_video_path = $movie->video_path;
             $this->poster_path = $movie->thumbnail;
             $this->is_premium = (bool) ($movie->is_premium ?? false);
@@ -215,7 +240,9 @@ new class extends Component {
         try {
             $this->validate([
                 'title' => 'required|min:1|max:255',
+                'slug' => 'required|string|max:255',
                 'description' => 'required|string|min:10',
+                'excerpt' => 'nullable|string|max:255',
                 'selectedCategories' => 'required|array|min:1',
                 'duration_minutes' => 'required|integer|min:1',
                 'status' => 'required|in:ready,hidden',
@@ -223,7 +250,7 @@ new class extends Component {
                 'poster_upload' => 'nullable|image|max:3072|mimes:jpg,jpeg,png,webp',
                 'manual_video_path' => 'nullable|string|max:500',
                 'video' => 'nullable|file|max:2048000',
-                'enc_key_upload' => 'nullable|file|max:2048', // Allow up to 2MB for the key file
+                'enc_key_base64' => 'nullable|string', // Validating as string now
             ]);
         } catch (\Illuminate\Validation\ValidationException $e) {
             $this->formErrors = $e->errors();
@@ -234,44 +261,43 @@ new class extends Component {
         try {
             DB::beginTransaction();
 
-            // ==========================================
-            // STEP 1: Determine the Final Slug FIRST
-            // ==========================================
-            $slug = '';
             $existingEncKey = null;
-
             if ($this->editingId) {
-                $existingMovie = DB::table('movies')->where('id', $this->editingId)->first();
-                $slug = $existingMovie->slug ?? Str::slug($this->title) . '-' . uniqid();
-                $existingEncKey = $existingMovie->enc_key; // Keep existing key path if not replaced
-            } else {
-                $slug = Str::slug($this->title) . '-' . uniqid();
+                $existingEncKey = DB::table('movies')->where('id', $this->editingId)->value('enc_key');
             }
 
             // ==========================================
-            // STEP 2: Process the Encryption Key Upload
+            // STEP 1: Process the Base64 Encryption Key
             // ==========================================
             $encKeyPath = $existingEncKey;
 
-            if ($this->enc_key_upload) {
-                // Rename it strictly to {slug}.key
-                $keyFilename = $slug . '.key';
+            if ($this->enc_key_base64) {
+                $keyFilename = $this->slug . '.key';
 
-                // Save it specifically to storage/app/video_keys (using the default 'local' disk)
-                $storedKey = $this->enc_key_upload->storeAs('video_keys', $keyFilename, 'local');
-
-                if (!$storedKey) {
-                    throw new \Exception('Failed to store encryption key locally.');
+                if (!Storage::disk('local')->exists('video_keys')) {
+                    Storage::disk('local')->makeDirectory('video_keys');
                 }
 
-                $encKeyPath = 'video_keys/' . $keyFilename;
+                // Strip out the "data:application/octet-stream;base64," prefix
+                $base64String = preg_replace('#^data:.*?;base64,#i', '', $this->enc_key_base64);
+
+                // Decode back to raw binary data
+                $keyData = base64_decode($base64String);
+
+                // Write directly to storage bypassing Livewire upload rules entirely
+                if (Storage::disk('local')->put('video_keys/' . $keyFilename, $keyData)) {
+                    $encKeyPath = 'video_keys/' . $keyFilename;
+                    Log::info("Base64 Encryption key saved successfully to: " . $encKeyPath);
+                } else {
+                    throw new \Exception('Failed to write encryption key to local storage.');
+                }
             }
 
             // ==========================================
-            // STEP 3: Process the Poster Upload
+            // STEP 2: Process the Poster Upload
             // ==========================================
             if ($this->poster_upload) {
-                $filename = 'posters/' . Str::slug($this->title) . '-' . time() . '.' . $this->poster_upload->getClientOriginalExtension();
+                $filename = 'posters/' . $this->slug . '-' . time() . '.' . $this->poster_upload->getClientOriginalExtension();
                 $stored = $this->poster_upload->storeAs('posters', $filename, 'public');
 
                 if (!$stored) throw new \Exception('Failed to store poster locally.');
@@ -279,32 +305,33 @@ new class extends Component {
             }
 
             if (!$this->poster_path && !$this->poster_upload) {
-                $this->formErrors['poster_upload'] = ['A movie poster is required. Upload one or select via TMDB.'];
+                $this->formErrors['poster_upload'] = ['A movie poster is required.'];
                 throw new \Exception('A poster image is required');
             }
 
             // ==========================================
-            // STEP 4: Build Database Payload
+            // STEP 3: Build Database Payload
             // ==========================================
             $data = [
                 'title' => $this->title,
-                'slug' => $slug,
+                'slug' => $this->slug,
                 'description' => $this->description,
+                'excerpt' => $this->excerpt,
                 'thumbnail' => $this->poster_path,
                 'duration_in_seconds' => (int) $this->duration_minutes * 60,
                 'is_premium' => $this->is_premium,
                 'status' => $this->status,
                 'type' => 'movie',
                 'video_disk' => 'b2',
-                'enc_key' => $encKeyPath, // Save the new key path to the database
+                'enc_key' => $encKeyPath,
                 'updated_at' => now(),
             ];
 
             // ==========================================
-            // STEP 5: Process Video Source
+            // STEP 4: Process Video Source
             // ==========================================
             if ($this->uploadMethod === 'file' && $this->video) {
-                $videoPath = $this->video->storeAs('movies/' . Str::slug($this->title), $this->video->getClientOriginalName(), 'b2');
+                $videoPath = $this->video->storeAs('movies/' . $this->slug, $this->video->getClientOriginalName(), 'b2');
                 if (!$videoPath) throw new \Exception('Failed to upload video to B2');
                 $data['video_path'] = $videoPath;
             } elseif (!empty($this->manual_video_path)) {
@@ -312,7 +339,7 @@ new class extends Component {
             }
 
             // ==========================================
-            // STEP 6: Commit to Database
+            // STEP 5: Commit to Database
             // ==========================================
             if ($this->editingId) {
                 DB::table('movies')->where('id', $this->editingId)->update($data);
@@ -500,7 +527,6 @@ new class extends Component {
                         </div>
 
                         <div class="pt-2 relative">
-                            <!-- This input is correctly scoped to bubble the upload progress events to the Alpine container above -->
                             <input type="file" wire:model="poster_upload" id="poster_upload" class="sr-only" accept="image/png, image/jpeg, image/jpg, image/webp">
                             <label for="poster_upload" class="block w-full text-center py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-white text-xs font-bold border border-slate-700 cursor-pointer transition">
                                 Upload Local Image
@@ -516,13 +542,31 @@ new class extends Component {
 
                     <!-- METADATA PANEL -->
                     <div class="col-span-1 md:col-span-3 space-y-5">
-                        <div>
-                            <input type="text" wire:model="title" placeholder="Movie Title" class="w-full bg-black border {{ isset($formErrors['title']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-white text-lg font-bold">
-                            @if(isset($formErrors['title'])) <p class="text-red-500 text-xs mt-1 font-bold">{{ $formErrors['title'][0] }}</p> @endif
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-[10px] font-bold text-slate-500 uppercase mb-2">Movie Title</label>
+                                <input type="text" wire:model.live.debounce.300ms="title" placeholder="Movie Title" class="w-full bg-black border {{ isset($formErrors['title']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-white text-lg font-bold">
+                                @if(isset($formErrors['title'])) <p class="text-red-500 text-xs mt-1 font-bold">{{ $formErrors['title'][0] }}</p> @endif
+                            </div>
+
+                            <div>
+                                <label class="block text-[10px] font-bold text-slate-500 uppercase mb-2">Auto-Generated Slug</label>
+                                <input type="text" wire:model="slug" class="w-full bg-[#111111] border {{ isset($formErrors['slug']) ? 'border-red-500' : 'border-slate-800' }} rounded-xl px-4 py-3 text-slate-400 font-mono text-sm" {{ $editingId ? 'readonly' : '' }}>
+                                @if(isset($formErrors['slug'])) <p class="text-red-500 text-xs mt-1 font-bold">{{ $formErrors['slug'][0] }}</p> @endif
+                            </div>
                         </div>
 
                         <div>
-                            <textarea wire:model="description" rows="4" placeholder="Synopsis..." class="w-full bg-black border {{ isset($formErrors['description']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-slate-300"></textarea>
+                            <label class="block text-[10px] font-bold text-slate-500 uppercase mb-2 flex justify-between">
+                                Short Excerpt <span class="text-slate-600 font-normal normal-case">Max 160 characters</span>
+                            </label>
+                            <textarea wire:model="excerpt" rows="2" maxlength="160" placeholder="Brief summary for UI cards..." class="w-full bg-black border {{ isset($formErrors['excerpt']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-slate-300 text-sm"></textarea>
+                            @if(isset($formErrors['excerpt'])) <p class="text-red-500 text-xs mt-1 font-bold">{{ $formErrors['excerpt'][0] }}</p> @endif
+                        </div>
+
+                        <div>
+                            <label class="block text-[10px] font-bold text-slate-500 uppercase mb-2">Full Description</label>
+                            <textarea wire:model.live.debounce.1000ms="description" rows="4" placeholder="Synopsis..." class="w-full bg-black border {{ isset($formErrors['description']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-slate-300 text-sm"></textarea>
                             @if(isset($formErrors['description'])) <p class="text-red-500 text-xs mt-1 font-bold">{{ $formErrors['description'][0] }}</p> @endif
                         </div>
 
@@ -608,35 +652,48 @@ new class extends Component {
                             @endif
                         </div>
 
-                        <!-- ENCRYPTION KEY PANEL -->
+                        <!-- 🚨 BULLETPROOF ENCRYPTION KEY PANEL (ALPINE.JS BASE64 METHOD) 🚨 -->
                         <div class="bg-black border border-slate-800 rounded-xl p-5">
                             <label class="block text-[10px] font-bold text-slate-500 uppercase mb-4 flex justify-between items-center">
                                 Encryption Key (.key)
                                 <span class="text-[9px] font-normal text-slate-600 italic normal-case">Will auto-rename to {slug}.key</span>
                             </label>
 
-                            <div x-data="{ isUploading: false, progress: 0 }"
-                                 x-on:livewire-upload-start="isUploading = true"
-                                 x-on:livewire-upload-finish="isUploading = false"
-                                 x-on:livewire-upload-error="isUploading = false"
-                                 x-on:livewire-upload-progress="progress = $event.detail.progress">
+                            <div x-data="{
+                                    isReady: false,
+                                    handleKeySelect(event) {
+                                        const file = event.target.files[0];
+                                        if (!file) return;
 
-                                <input type="file" wire:model="enc_key_upload" accept=".key" class="w-full text-xs text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-blue-950 file:text-blue-500 hover:file:bg-blue-900 cursor-pointer transition">
+                                        const reader = new FileReader();
+                                        reader.onload = (e) => {
+                                            // Sends the raw file data as a string to Livewire
+                                            @this.set('enc_key_base64', e.target.result);
+                                            this.isReady = true;
+                                        };
+                                        reader.readAsDataURL(file);
+                                    }
+                                 }">
 
-                                <div x-show="isUploading" class="mt-3" style="display: none;">
-                                    <div class="flex justify-between text-[10px] font-black text-slate-400 mb-1 italic">
-                                        <span>SECURING KEY...</span>
-                                        <span x-text="progress + '%'"></span>
-                                    </div>
-                                    <div class="w-full bg-zinc-900 h-1.5 rounded-full overflow-hidden">
-                                        <div class="bg-blue-500 h-full transition-all duration-300" :style="'width: ' + progress + '%'"></div>
-                                    </div>
+                                <input type="file" accept=".key" @change="handleKeySelect" class="w-full text-xs text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-blue-950 file:text-blue-500 hover:file:bg-blue-900 cursor-pointer transition">
+
+                                <div x-show="isReady || @js(!empty($enc_key_base64))" class="mt-3" style="display: none;">
+                                    <p class="text-[9px] text-blue-500 font-bold uppercase tracking-wider">✓ Key loaded and ready to attach</p>
                                 </div>
                             </div>
-                            @if(isset($formErrors['enc_key_upload'])) <p class="text-red-500 text-xs mt-2 font-bold">{{ $formErrors['enc_key_upload'][0] }}</p> @endif
 
-                            @if($editingId && DB::table('movies')->where('id', $editingId)->value('enc_key'))
-                                <p class="text-[9px] text-emerald-500 font-bold mt-3 uppercase tracking-wider">✓ Secure Key Active in Database</p>
+                            @if($editingId)
+                                @php $activeKey = DB::table('movies')->where('id', $editingId)->value('enc_key'); @endphp
+                                @if($activeKey)
+                                    <div class="mt-4 p-2.5 bg-emerald-950/30 border border-emerald-900/50 rounded-lg">
+                                        <p class="text-[9px] text-emerald-500 font-bold uppercase tracking-wider mb-1">✓ Active Secure Key Path</p>
+                                        <p class="text-[10px] text-slate-300 font-mono">{{ $activeKey }}</p>
+                                    </div>
+                                @else
+                                    <div class="mt-4 p-2.5 bg-red-950/30 border border-red-900/50 rounded-lg">
+                                        <p class="text-[9px] text-red-500 font-bold uppercase tracking-wider">⚠️ No key attached</p>
+                                    </div>
+                                @endif
                             @endif
                         </div>
 
