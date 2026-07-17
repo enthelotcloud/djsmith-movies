@@ -38,7 +38,7 @@ new class extends Component {
     public $manual_video_path = '';
     public $video;
 
-    // NEW: Base64 String for the Encryption Key
+    // Base64 String for the Encryption Key
     public $enc_key_base64;
 
     // Error tracking
@@ -250,7 +250,7 @@ new class extends Component {
                 'poster_upload' => 'nullable|image|max:3072|mimes:jpg,jpeg,png,webp',
                 'manual_video_path' => 'nullable|string|max:500',
                 'video' => 'nullable|file|max:2048000',
-                'enc_key_base64' => 'nullable|string', // Validating as string now
+                'enc_key_base64' => 'nullable|string',
             ]);
         } catch (\Illuminate\Validation\ValidationException $e) {
             $this->formErrors = $e->errors();
@@ -267,30 +267,32 @@ new class extends Component {
             }
 
             // ==========================================
-            // STEP 1: Process the Base64 Encryption Key
+            // 🚨 BULLETPROOF KEY STORAGE
             // ==========================================
             $encKeyPath = $existingEncKey;
 
-            if ($this->enc_key_base64) {
+            if (!empty($this->enc_key_base64)) {
+                // Ensure directory physically exists
+                $directory = storage_path('app/video_keys');
+                if (!is_dir($directory)) {
+                    mkdir($directory, 0755, true);
+                }
+
                 $keyFilename = $this->slug . '.key';
+                $absolutePath = $directory . '/' . $keyFilename;
 
-                if (!Storage::disk('local')->exists('video_keys')) {
-                    Storage::disk('local')->makeDirectory('video_keys');
+                // Clean the payload (just in case the frontend split missed something)
+                $cleanBase64 = preg_replace('#^data:.*?;base64,#i', '', $this->enc_key_base64);
+                $keyData = base64_decode($cleanBase64);
+
+                // Native PHP write - directly to the Linux filesystem
+                $bytesWritten = file_put_contents($absolutePath, $keyData);
+
+                if ($bytesWritten === false) {
+                    throw new \Exception("Server denied write permissions to: " . $absolutePath);
                 }
 
-                // Strip out the "data:application/octet-stream;base64," prefix
-                $base64String = preg_replace('#^data:.*?;base64,#i', '', $this->enc_key_base64);
-
-                // Decode back to raw binary data
-                $keyData = base64_decode($base64String);
-
-                // Write directly to storage bypassing Livewire upload rules entirely
-                if (Storage::disk('local')->put('video_keys/' . $keyFilename, $keyData)) {
-                    $encKeyPath = 'video_keys/' . $keyFilename;
-                    Log::info("Base64 Encryption key saved successfully to: " . $encKeyPath);
-                } else {
-                    throw new \Exception('Failed to write encryption key to local storage.');
-                }
+                $encKeyPath = 'video_keys/' . $keyFilename;
             }
 
             // ==========================================
@@ -498,7 +500,7 @@ new class extends Component {
             <form wire:submit="saveMovie" class="space-y-6">
 
                 <div class="grid grid-cols-1 md:grid-cols-4 gap-8">
-                    <!-- POSTER PREVIEW PANEL WITH PROGRESS -->
+                    <!-- POSTER PREVIEW PANEL -->
                     <div class="col-span-1 space-y-4"
                          x-data="{ isUploading: false, progress: 0 }"
                          x-on:livewire-upload-start="isUploading = true"
@@ -652,34 +654,49 @@ new class extends Component {
                             @endif
                         </div>
 
-                        <!-- 🚨 BULLETPROOF ENCRYPTION KEY PANEL (ALPINE.JS BASE64 METHOD) 🚨 -->
-                        <div class="bg-black border border-slate-800 rounded-xl p-5">
+                        <!-- 🚨 WAF-SAFE HIDDEN INPUT ENCRYPTION KEY PANEL 🚨 -->
+                        <div class="bg-black border border-slate-800 rounded-xl p-5"
+                             x-data="{
+                                keyLoaded: false,
+                                handleKeySelect(event) {
+                                    const file = event.target.files[0];
+                                    if (!file) {
+                                        this.keyLoaded = false;
+                                        $refs.hiddenKeyInput.value = '';
+                                        $refs.hiddenKeyInput.dispatchEvent(new Event('input', { bubbles: true }));
+                                        return;
+                                    }
+
+                                    const reader = new FileReader();
+                                    reader.onload = (e) => {
+                                        // Strip out 'data:...' to avoid WAF blocks in production
+                                        const pureBase64 = e.target.result.split(',')[1];
+
+                                        // Assign it to the hidden input
+                                        $refs.hiddenKeyInput.value = pureBase64;
+
+                                        // Force Livewire to recognize the change instantly
+                                        $refs.hiddenKeyInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+                                        this.keyLoaded = true;
+                                    };
+                                    reader.readAsDataURL(file);
+                                }
+                             }">
+
                             <label class="block text-[10px] font-bold text-slate-500 uppercase mb-4 flex justify-between items-center">
                                 Encryption Key (.key)
                                 <span class="text-[9px] font-normal text-slate-600 italic normal-case">Will auto-rename to {slug}.key</span>
                             </label>
 
-                            <div x-data="{
-                                    isReady: false,
-                                    handleKeySelect(event) {
-                                        const file = event.target.files[0];
-                                        if (!file) return;
+                            <!-- Visible File Input to capture the file locally -->
+                            <input type="file" accept=".key" @change="handleKeySelect" class="w-full text-xs text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-blue-950 file:text-blue-500 hover:file:bg-blue-900 cursor-pointer transition">
 
-                                        const reader = new FileReader();
-                                        reader.onload = (e) => {
-                                            // Sends the raw file data as a string to Livewire
-                                            @this.set('enc_key_base64', e.target.result);
-                                            this.isReady = true;
-                                        };
-                                        reader.readAsDataURL(file);
-                                    }
-                                 }">
+                            <!-- Hidden input actually bound to Livewire -->
+                            <input type="hidden" wire:model="enc_key_base64" x-ref="hiddenKeyInput">
 
-                                <input type="file" accept=".key" @change="handleKeySelect" class="w-full text-xs text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-blue-950 file:text-blue-500 hover:file:bg-blue-900 cursor-pointer transition">
-
-                                <div x-show="isReady || @js(!empty($enc_key_base64))" class="mt-3" style="display: none;">
-                                    <p class="text-[9px] text-blue-500 font-bold uppercase tracking-wider">✓ Key loaded and ready to attach</p>
-                                </div>
+                            <div x-show="keyLoaded" class="mt-3" style="display: none;">
+                                <p class="text-[9px] text-blue-500 font-bold uppercase tracking-wider">✓ Key ready to deploy</p>
                             </div>
 
                             @if($editingId)
@@ -689,14 +706,9 @@ new class extends Component {
                                         <p class="text-[9px] text-emerald-500 font-bold uppercase tracking-wider mb-1">✓ Active Secure Key Path</p>
                                         <p class="text-[10px] text-slate-300 font-mono">{{ $activeKey }}</p>
                                     </div>
-                                @else
-                                    <div class="mt-4 p-2.5 bg-red-950/30 border border-red-900/50 rounded-lg">
-                                        <p class="text-[9px] text-red-500 font-bold uppercase tracking-wider">⚠️ No key attached</p>
-                                    </div>
                                 @endif
                             @endif
                         </div>
-
                     </div>
                 </div>
 
