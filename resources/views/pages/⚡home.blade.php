@@ -31,9 +31,21 @@ class extends Component
             $this->enforceSingleSession();
         }
 
-        // Get the top 5 newest movies for the slider
-        $this->featuredMovies = DB::table('movies')
-            ->where('status', 'ready')
+        // Get the top 5 newest movies for the slider, excluding completed ones
+        $sliderQuery = DB::table('movies')->where('status', 'ready');
+
+        if ($this->isLoggedIn) {
+            $watchedIds = DB::table('watch_histories')
+                ->where('user_id', Auth::id())
+                ->where('is_completed', true)
+                ->pluck('movie_id');
+
+            if ($watchedIds->isNotEmpty()) {
+                $sliderQuery->whereNotIn('id', $watchedIds);
+            }
+        }
+
+        $this->featuredMovies = $sliderQuery
             ->orderBy('created_at', 'desc')
             ->take(5)
             ->get();
@@ -61,9 +73,34 @@ class extends Component
     #[Computed]
     public function movies()
     {
-        return DB::table('movies')
-            ->where('status', 'ready')
-            ->orderBy('created_at', 'desc')
+        $query = DB::table('movies')->where('status', 'ready');
+
+        if ($this->isLoggedIn) {
+            $watchedIds = DB::table('watch_histories')
+                ->where('user_id', Auth::id())
+                ->where('is_completed', true)
+                ->pluck('movie_id');
+
+            if ($watchedIds->isNotEmpty()) {
+                $query->whereNotIn('id', $watchedIds);
+            }
+        }
+
+        return $query->orderBy('created_at', 'desc')->get();
+    }
+
+    #[Computed]
+    public function continueWatching()
+    {
+        if (!$this->isLoggedIn) return collect();
+
+        return DB::table('watch_histories')
+            ->join('movies', 'watch_histories.movie_id', '=', 'movies.id')
+            ->where('watch_histories.user_id', Auth::id())
+            ->where('watch_histories.is_completed', false)
+            ->where('movies.status', 'ready')
+            ->select('movies.*', 'watch_histories.progress_seconds')
+            ->orderBy('watch_histories.updated_at', 'desc')
             ->get();
     }
 
@@ -334,6 +371,73 @@ class extends Component
 
     {{-- 📂 MAIN CONTENT --}}
     <div id="browse" class="relative z-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 space-y-20">
+
+        {{-- ⏳ CONTINUE WATCHING (Only visible to logged-in users with records) --}}
+        @if($this->isLoggedIn && $this->continueWatching->isNotEmpty())
+            <section>
+                <div class="flex items-center justify-between mb-8">
+                    <div class="flex items-center gap-4">
+                        <span class="w-1 h-8 bg-red-600 rounded-full"></span>
+                        <h2 class="text-2xl sm:text-3xl font-black text-white tracking-tight">Continue Watching</h2>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+                    @foreach($this->continueWatching as $movie)
+                        @php
+                            $actionUrl = $this->getMovieAction($movie);
+                            $movieThumb = $movie->thumbnail ?? $movie->thumbnail_path ?? null;
+                            $percent = $movie->duration_in_seconds ? min(100, max(0, ($movie->progress_seconds / $movie->duration_in_seconds) * 100)) : 0;
+                        @endphp
+
+                        <div class="group relative bg-zinc-900 rounded-2xl overflow-hidden border border-slate-800 hover:border-red-500/50 transition-all duration-500 hover:scale-[1.02]">
+
+                            {{-- Poster Layer --}}
+                            <div class="aspect-[2/3] w-full relative overflow-hidden bg-zinc-950">
+                                @if($movieThumb)
+                                    <img src="{{ str_starts_with($movieThumb, 'http') ? $movieThumb : Storage::disk('public')->url($movieThumb) }}"
+                                         class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 opacity-80 group-hover:opacity-100"
+                                         alt="{{ $movie->title }}"
+                                         loading="lazy">
+                                @else
+                                    <div class="w-full h-full bg-zinc-800 flex items-center justify-center">
+                                        <svg class="w-12 h-12 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                                        </svg>
+                                    </div>
+                                @endif
+
+                                {{-- Play Overlays --}}
+                                <div class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-all duration-300 flex items-center justify-center z-10">
+                                    <a href="{{ $actionUrl }}" wire:navigate class="w-12 h-12 bg-red-600/90 rounded-full flex items-center justify-center border border-red-500 shadow-xl transition-transform hover:scale-110">
+                                        <svg class="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 20 20"><path d="M4 4l12 6-12 6z"/></svg>
+                                    </a>
+                                </div>
+
+                                {{-- Progress Indicator Bar --}}
+                                <div class="absolute bottom-0 left-0 right-0 h-1.5 bg-zinc-800 z-20">
+                                    <div class="h-full bg-red-600 shadow-[0_0_10px_rgba(220,38,38,0.7)] transition-all" style="width: {{ $percent }}%;"></div>
+                                </div>
+                            </div>
+
+                            {{-- Bottom Info Segment --}}
+                            <div class="p-3">
+                                <h3 class="text-sm font-bold text-white truncate group-hover:text-red-500 transition">
+                                    {{ $movie->title }}
+                                </h3>
+                                <p class="text-xs text-slate-500 mt-0.5">
+                                    @if($movie->duration_in_seconds)
+                                        Resumes at {{ $this->formatDuration($movie->progress_seconds) }}
+                                    @else
+                                        In Progress
+                                    @endif
+                                </p>
+                            </div>
+                        </div>
+                    @endforeach
+                </div>
+            </section>
+        @endif
 
         {{-- 🎯 LATEST RELEASES --}}
         @if($this->latestMovies->isNotEmpty())

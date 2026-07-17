@@ -5,6 +5,7 @@ use Illuminate\Support\Facades\{Route, DB, Storage, Log, Cache, Auth};
 use Illuminate\Support\Str;
 
 Route::livewire('/', 'pages::home')->name('home');
+Route::livewire('/live', 'pages::live')->name('live');
 Route::view('/about', 'about')->name('about');
 Route::view('/contact', 'contact')->name('contact');
 Route::view('/faqs', 'faqs')->name('faqs');
@@ -114,19 +115,19 @@ Route::prefix('staff')
     Route::livewire('/dashboard', 'staff::dashboard')->name('dashboard');
 });
 
-Route::get('/debug-key', function () {
-    $slug = 'snakes-on-a-plane-6a58244f0caf8'; // Your exact movie slug
-    $keyPath = "video_keys/{$slug}.key";
+// Route::get('/debug-key', function () {
+//     $slug = 'snakes-on-a-plane-6a58244f0caf8'; // Your exact movie slug
+//     $keyPath = "video_keys/{$slug}.key";
 
-    // Get the exact Windows path Laravel is looking at
-    $absolutePath = storage_path("app/" . $keyPath);
-    $exists = Storage::disk('local')->exists($keyPath);
+//     // Get the exact Windows path Laravel is looking at
+//     $absolutePath = storage_path("app/" . $keyPath);
+//     $exists = Storage::disk('local')->exists($keyPath);
 
-    return response()->json([
-        'laravel_is_looking_here' => $absolutePath,
-        'does_the_file_exist' => $exists ? 'YES!' : 'NO - FILE MISSING',
-        'files_in_this_folder' => Storage::disk('local')->files('video_keys')
-    ]);
-});
+//     return response()->json([
+//         'laravel_is_looking_here' => $absolutePath,
+//         'does_the_file_exist' => $exists ? 'YES!' : 'NO - FILE MISSING',
+//         'files_in_this_folder' => Storage::disk('local')->files('video_keys')
+//     ]);
+// });
 
 require __DIR__.'/settings.php';

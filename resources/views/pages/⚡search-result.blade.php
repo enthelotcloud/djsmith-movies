@@ -53,9 +53,9 @@ class extends Component {
 
         $movies = $query->orderBy('movies.created_at', 'desc')->paginate(20);
 
-        // Map safe B2 Thumbnail URLs
+        // Map safe Local Public Thumbnail URLs
         $movies->getCollection()->transform(function ($movie) {
-            $movie->posterUrl = $this->getPosterUrl($movie->thumbnail_path);
+            $movie->posterUrl = $this->getPosterUrl($movie->thumbnail ?? $movie->thumbnail_path ?? null);
             return $movie;
         });
 
@@ -67,7 +67,7 @@ class extends Component {
         if (!$path) return null;
         if (str_starts_with($path, 'http')) return $path;
         try {
-            return Storage::disk('b2')->temporaryUrl($path, now()->addHours(2));
+            return Storage::disk('public')->url($path);
         } catch (\Exception $e) {
             return null;
         }
@@ -79,7 +79,7 @@ class extends Component {
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
 
         {{-- Page Header --}}
-        <div class="mb-10">
+        <div class="mb-10 mt-12 lg:mt-0">
             <h1 class="text-4xl font-black text-white tracking-tight">
                 @if($q)
                     Results for "<span class="text-red-500">{{ $q }}</span>"
@@ -95,17 +95,34 @@ class extends Component {
             {{-- SIDEBAR FILTERS --}}
             <div class="w-full md:w-64 flex-shrink-0">
                 <div class="bg-[#111] border border-slate-800 rounded-2xl p-6 sticky top-28">
+
+                    {{-- AJAX Search Input --}}
+                    <div class="mb-6 relative">
+                        <input type="text"
+                               wire:model.live.debounce.300ms="q"
+                               placeholder="Search library..."
+                               class="w-full bg-black/50 border border-slate-700 rounded-xl pl-10 pr-10 py-3 text-sm text-white placeholder-slate-500 focus:ring-2 focus:ring-red-500/50 focus:border-red-500 transition-all outline-none shadow-inner">
+                        <svg class="absolute left-3 top-3.5 w-5 h-5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                        </svg>
+                        @if($q)
+                            <button wire:click="$set('q', '')" class="absolute right-3 top-3.5 text-slate-500 hover:text-white transition-colors">
+                                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                            </button>
+                        @endif
+                    </div>
+
                     <h3 class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4">Categories</h3>
 
                     <div class="space-y-2">
                         <button wire:click="$set('category', '')"
-                                class="w-full text-left px-3 py-2 rounded-lg text-sm font-bold transition {{ $category === '' ? 'bg-red-600 text-white' : 'text-slate-400 hover:text-white hover:bg-zinc-800' }}">
+                                class="w-full text-left px-3 py-2.5 rounded-lg text-sm font-bold transition {{ $category === '' ? 'bg-red-600 text-white shadow-lg shadow-red-600/20' : 'text-slate-400 hover:text-white hover:bg-zinc-800' }}">
                             All Content
                         </button>
 
                         @foreach($this->categories as $cat)
                             <button wire:click="$set('category', '{{ $cat->id }}')"
-                                    class="w-full text-left px-3 py-2 rounded-lg text-sm font-bold transition {{ (string)$category === (string)$cat->id ? 'bg-red-600 text-white' : 'text-slate-400 hover:text-white hover:bg-zinc-800' }}">
+                                    class="w-full text-left px-3 py-2.5 rounded-lg text-sm font-bold transition {{ (string)$category === (string)$cat->id ? 'bg-red-600 text-white shadow-lg shadow-red-600/20' : 'text-slate-400 hover:text-white hover:bg-zinc-800' }}">
                                 {{ $cat->name }}
                             </button>
                         @endforeach

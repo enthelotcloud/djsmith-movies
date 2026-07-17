@@ -36,7 +36,7 @@ new class extends Component
                         'title' => $movie->title,
                         'slug' => $movie->slug,
                         'excerpt' => Str::limit($movie->description, 50),
-                        'poster' => $this->getPosterUrl($movie->thumbnail_path)
+                        'poster' => $this->getPosterUrl($movie->thumbnail ?? $movie->thumbnail_path ?? null)
                     ];
                 })
                 ->toArray();
@@ -50,7 +50,7 @@ new class extends Component
         if (!$path) return null;
         if (str_starts_with($path, 'http')) return $path;
         try {
-            return Storage::disk('b2')->temporaryUrl($path, now()->addHours(2));
+            return Storage::disk('public')->url($path);
         } catch (\Exception $e) {
             return null;
         }
@@ -99,7 +99,6 @@ new class extends Component
         class="fixed top-0 left-0 right-0 z-50 transition-all duration-500"
         x-data="{
             scrolled: false,
-            openSearch: false,
             mobileMenu: false,
             searchFocused: false,
             history: JSON.parse(localStorage.getItem('dj_search_history') || '[]'),
@@ -129,10 +128,10 @@ new class extends Component
         :class="{ 'bg-black/80 backdrop-blur-2xl border-b border-white/5 shadow-2xl shadow-black/50': scrolled, 'bg-gradient-to-b from-black/90 to-transparent': !scrolled }"
     >
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div class="flex items-center justify-between h-16 lg:h-20">
+            <div class="flex items-center justify-between h-16 lg:h-20 gap-2 sm:gap-4">
 
                 {{-- Left: Logo & Nav --}}
-                <div class="flex items-center gap-8">
+                <div class="flex items-center gap-8 shrink-0">
                     <a href="/" class="flex items-center gap-3 group shrink-0" wire:navigate>
                         <div class="relative">
                             <img
@@ -162,9 +161,9 @@ new class extends Component
                     </nav>
                 </div>
 
-                {{-- Center: Desktop Search --}}
-                <div class="hidden md:flex flex-1 max-w-md mx-4 lg:mx-8 relative">
-                    <form wire:submit.prevent="submitSearch" @submit="saveSearch($wire.search)" class="w-full relative group z-50">
+                {{-- Center: Unified Search (Visible on all screens, flex-1 allows scaling) --}}
+                <div class="flex flex-1 max-w-md mx-1 sm:mx-4 lg:mx-8 relative z-50">
+                    <form wire:submit.prevent="submitSearch" @submit="saveSearch($wire.search)" class="w-full relative group">
                         <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                             <svg class="h-4 w-4 text-gray-500 group-focus-within:text-red-400 transition-colors duration-200" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
@@ -175,8 +174,8 @@ new class extends Component
                             wire:model.live.debounce.300ms="search"
                             @focus="searchFocused = true"
                             @click.outside="searchFocused = false"
-                            placeholder="Search movies, shows..."
-                            class="w-full pl-10 pr-10 py-2 bg-white/5 border border-white/10 rounded-full text-sm text-white placeholder-gray-500 focus:outline-none focus:border-red-500/50 focus:bg-black/80 focus:ring-2 focus:ring-red-500/20 transition-all duration-300"
+                            placeholder="Search..."
+                            class="w-full pl-9 sm:pl-10 pr-9 sm:pr-10 py-2 sm:py-2.5 bg-white/5 border border-white/10 rounded-full text-sm text-white placeholder-gray-500 focus:outline-none focus:border-red-500/50 focus:bg-black/80 focus:ring-2 focus:ring-red-500/20 transition-all duration-300"
                         >
                         @if($search)
                             <button type="button" wire:click="$set('search', '')" class="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-500 hover:text-white">
@@ -238,13 +237,7 @@ new class extends Component
                 </div>
 
                 {{-- Right: Actions --}}
-                <div class="flex items-center gap-2 lg:gap-4">
-
-                    {{-- Mobile Search Toggle --}}
-                    <button @click="openSearch = !openSearch" class="md:hidden p-2 text-gray-400 hover:text-white rounded-lg transition-colors">
-                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
-                    </button>
-
+                <div class="flex items-center gap-1 sm:gap-4 shrink-0">
                     @auth
                         {{-- Notifications --}}
                         <button class="relative p-2 text-gray-400 hover:text-white rounded-full hover:bg-white/10 transition-all duration-200">
@@ -307,19 +300,12 @@ new class extends Component
                 </div>
             </div>
 
-            {{-- Mobile Search Dropdown --}}
-            <div x-show="openSearch" x-collapse class="md:hidden pb-4 relative z-40" style="display: none;">
-                <form wire:submit.prevent="submitSearch" @submit="saveSearch($wire.search)" class="relative">
-                    <input type="text" wire:model.live.debounce.300ms="search" placeholder="Search movies, shows..." class="w-full pl-10 pr-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm text-white placeholder-gray-500 focus:outline-none focus:border-red-500/50 focus:bg-black/90">
-                    <svg class="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
-                </form>
-            </div>
-
-            {{-- Mobile Navigation Menu --}}
+            {{-- Mobile Navigation Menu (Dropdown) --}}
             <div x-show="mobileMenu" x-collapse class="lg:hidden pb-4" style="display: none;">
-                <nav class="flex flex-col gap-1 bg-gray-900/80 backdrop-blur-xl rounded-2xl border border-white/5 p-2">
+                <nav class="flex flex-col gap-1 bg-gray-900/80 backdrop-blur-xl rounded-2xl border border-white/5 p-2 mx-4 mt-2">
                     <a href="/" wire:navigate class="text-sm text-gray-400 hover:text-white px-3 py-2.5 rounded-xl hover:bg-white/5 transition-colors">Home</a>
                     <a href="{{ route('client.search') }}" wire:navigate class="text-sm text-gray-400 hover:text-white px-3 py-2.5 rounded-xl hover:bg-white/5 transition-colors">Browse Catalog</a>
+                    <a href="{{ route('live') }}" wire:navigate class="text-sm text-gray-400 hover:text-white px-3 py-2.5 rounded-xl hover:bg-white/5 transition-colors">Live TV</a>
                     @auth
                         <a href="{{ route('client.subscriptions') }}" wire:navigate class="text-sm text-gray-400 hover:text-white px-3 py-2.5 rounded-xl hover:bg-white/5 transition-colors">Plans</a>
                         <button wire:click="goToDashboard" class="text-left text-sm text-gray-400 hover:text-white px-3 py-2.5 rounded-xl hover:bg-white/5 transition-colors">Dashboard</button>
@@ -341,7 +327,7 @@ new class extends Component
     {{-- ========================================== --}}
     <div class="lg:hidden fixed bottom-0 left-0 right-0 z-50 pb-4 px-4"
          x-data="{
-            activeTab: '{{ $currentRoute ? (str_contains($currentRoute, 'home') ? 'home' : (str_contains($currentRoute, 'search') ? 'search' : (str_contains($currentRoute, 'subscriptions') ? 'plans' : (str_contains($currentRoute, 'dashboard') ? 'dashboard' : 'home')))) : 'home' }}'
+            activeTab: '{{ $currentRoute ? (str_contains($currentRoute, 'home') ? 'home' : (str_contains($currentRoute, 'search') ? 'search' : (str_contains($currentRoute, 'subscriptions') ? 'plans' : (str_contains($currentRoute, 'live') ? 'live' : 'home')))) : 'home' }}'
          }">
 
         {{-- Glass morphism container --}}
@@ -365,121 +351,90 @@ new class extends Component
                 {{-- Home --}}
                 <a href="/" wire:navigate
                    @click="activeTab = 'home'"
-                   class="relative flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 transition-all duration-300 group">
+                   class="relative flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 transition-all duration-300 group w-16">
 
-                    {{-- Active indicator --}}
-                    <div x-show="activeTab === 'home'"
-                         x-transition
-                         class="absolute -top-1 left-1/2 -translate-x-1/2 w-8 h-0.5 bg-gradient-to-r from-red-500 to-red-600 rounded-full shadow-lg shadow-red-500/50">
-                    </div>
+                    <div x-show="activeTab === 'home'" x-transition class="absolute -top-1 left-1/2 -translate-x-1/2 w-8 h-0.5 bg-gradient-to-r from-red-500 to-red-600 rounded-full shadow-lg shadow-red-500/50"></div>
 
-                    <svg class="w-6 h-6 transition-all duration-300"
-                         :class="activeTab === 'home' ? 'text-red-500 drop-shadow-lg drop-shadow-red-500/50' : 'text-gray-500 group-hover:text-gray-300'"
-                         fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                    <svg class="w-6 h-6 transition-all duration-300" :class="activeTab === 'home' ? 'text-red-500 drop-shadow-lg drop-shadow-red-500/50' : 'text-gray-500 group-hover:text-gray-300'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
                     </svg>
-                    <span class="text-[10px] font-medium transition-all duration-300"
-                          :class="activeTab === 'home' ? 'text-red-500' : 'text-gray-500 group-hover:text-gray-300'">
+                    <span class="text-[10px] font-medium transition-all duration-300" :class="activeTab === 'home' ? 'text-red-500' : 'text-gray-500 group-hover:text-gray-300'">
                         Home
                     </span>
                 </a>
 
-                {{-- Search --}}
+                {{-- Search / Browse --}}
                 <a href="{{ route('client.search') }}" wire:navigate
                    @click="activeTab = 'search'"
-                   class="relative flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 transition-all duration-300 group">
+                   class="relative flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 transition-all duration-300 group w-16">
 
-                    <div x-show="activeTab === 'search'"
-                         x-transition
-                         class="absolute -top-1 left-1/2 -translate-x-1/2 w-8 h-0.5 bg-gradient-to-r from-red-500 to-red-600 rounded-full shadow-lg shadow-red-500/50">
-                    </div>
+                    <div x-show="activeTab === 'search'" x-transition class="absolute -top-1 left-1/2 -translate-x-1/2 w-8 h-0.5 bg-gradient-to-r from-red-500 to-red-600 rounded-full shadow-lg shadow-red-500/50"></div>
 
-                    <svg class="w-6 h-6 transition-all duration-300"
-                         :class="activeTab === 'search' ? 'text-red-500 drop-shadow-lg drop-shadow-red-500/50' : 'text-gray-500 group-hover:text-gray-300'"
-                         fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                    <svg class="w-6 h-6 transition-all duration-300" :class="activeTab === 'search' ? 'text-red-500 drop-shadow-lg drop-shadow-red-500/50' : 'text-gray-500 group-hover:text-gray-300'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
                     </svg>
-                    <span class="text-[10px] font-medium transition-all duration-300"
-                          :class="activeTab === 'search' ? 'text-red-500' : 'text-gray-500 group-hover:text-gray-300'">
+                    <span class="text-[10px] font-medium transition-all duration-300" :class="activeTab === 'search' ? 'text-red-500' : 'text-gray-500 group-hover:text-gray-300'">
                         Browse
                     </span>
                 </a>
 
-                {{-- Center: Logo --}}
-                <div class="relative -mt-8">
+                {{-- Center: Chat (Toasts Notification) --}}
+                <div class="relative -mt-8 mx-2">
                     <div class="absolute inset-0 bg-red-600/20 blur-xl rounded-full pointer-events-none"></div>
                     <div class="relative w-12 h-12 bg-gradient-to-br from-red-600 to-red-800 rounded-full flex items-center justify-center
                                 shadow-2xl shadow-red-600/30 ring-4 ring-gray-900/80
                                 before:absolute before:inset-0 before:rounded-full before:bg-gradient-to-b before:from-white/20 before:to-transparent before:pointer-events-none
                                 transition-transform duration-300 hover:scale-110 active:scale-95">
-                        <a href="/" wire:navigate class="flex items-center justify-center">
-                            <svg class="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 24 24">
-                                <path d="M18 3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12zm-1 2H7a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1zm-2 7l-4-3v6l4-3z"/>
+                        <a href="#" @click.prevent="$dispatch('notify-toast', { type: 'info', message: 'Chat and community coming soon' })" class="flex items-center justify-center">
+                            <svg class="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                             </svg>
                         </a>
                     </div>
                 </div>
 
+                {{-- Live (Now accessible to everyone) --}}
+                <a href="{{ route('live') }}" wire:navigate
+                   @click="activeTab = 'live'"
+                   class="relative flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 transition-all duration-300 group w-16">
+
+                    <div x-show="activeTab === 'live'" x-transition class="absolute -top-1 left-1/2 -translate-x-1/2 w-8 h-0.5 bg-gradient-to-r from-red-500 to-red-600 rounded-full shadow-lg shadow-red-500/50"></div>
+
+                    <svg class="w-6 h-6 transition-all duration-300" :class="activeTab === 'live' ? 'text-red-500 drop-shadow-lg drop-shadow-red-500/50' : 'text-gray-500 group-hover:text-gray-300'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                    <span class="text-[10px] font-medium transition-all duration-300" :class="activeTab === 'live' ? 'text-red-500' : 'text-gray-500 group-hover:text-gray-300'">
+                        Live
+                    </span>
+                </a>
+
                 @auth
-                    {{-- Subscriptions --}}
+                    {{-- Plans --}}
                     <a href="{{ route('client.subscriptions') }}" wire:navigate
                        @click="activeTab = 'plans'"
-                       class="relative flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 transition-all duration-300 group">
+                       class="relative flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 transition-all duration-300 group w-16">
 
-                        <div x-show="activeTab === 'plans'"
-                             x-transition
-                             class="absolute -top-1 left-1/2 -translate-x-1/2 w-8 h-0.5 bg-gradient-to-r from-red-500 to-red-600 rounded-full shadow-lg shadow-red-500/50">
-                        </div>
+                        <div x-show="activeTab === 'plans'" x-transition class="absolute -top-1 left-1/2 -translate-x-1/2 w-8 h-0.5 bg-gradient-to-r from-red-500 to-red-600 rounded-full shadow-lg shadow-red-500/50"></div>
 
-                        <svg class="w-6 h-6 transition-all duration-300"
-                             :class="activeTab === 'plans' ? 'text-red-500 drop-shadow-lg drop-shadow-red-500/50' : 'text-gray-500 group-hover:text-gray-300'"
-                             fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                        <svg class="w-6 h-6 transition-all duration-300" :class="activeTab === 'plans' ? 'text-red-500 drop-shadow-lg drop-shadow-red-500/50' : 'text-gray-500 group-hover:text-gray-300'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M15 5v2m0 4v2m0 4v2M5 5a2 2 0 00-2 2v3a2 2 0 110 4v3a2 2 0 002 2h14a2 2 0 002-2v-3a2 2 0 110-4V7a2 2 0 00-2-2H5z"/>
                         </svg>
-                        <span class="text-[10px] font-medium transition-all duration-300"
-                              :class="activeTab === 'plans' ? 'text-red-500' : 'text-gray-500 group-hover:text-gray-300'">
+                        <span class="text-[10px] font-medium transition-all duration-300" :class="activeTab === 'plans' ? 'text-red-500' : 'text-gray-500 group-hover:text-gray-300'">
                             Plans
                         </span>
                     </a>
-
-                    {{-- Profile --}}
-                    <button wire:click="goToDashboard"
-                       @click="activeTab = 'dashboard'"
-                       class="relative flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 transition-all duration-300 group">
-
-                        <div x-show="activeTab === 'dashboard'"
-                             x-transition
-                             class="absolute -top-1 left-1/2 -translate-x-1/2 w-8 h-0.5 bg-gradient-to-r from-red-500 to-red-600 rounded-full shadow-lg shadow-red-500/50">
-                        </div>
-
-                        <div class="w-6 h-6 rounded-full bg-gradient-to-br from-gray-600 to-gray-800 flex items-center justify-center
-                                    transition-all duration-300"
-                             :class="activeTab === 'dashboard' ? 'ring-2 ring-red-500/50 shadow-lg shadow-red-500/30' : 'group-hover:ring-1 ring-white/20'">
-                            <span class="text-[10px] font-bold text-white">{{ Auth::user()->name ? strtoupper(substr(Auth::user()->name, 0, 1)) : 'U' }}</span>
-                        </div>
-                        <span class="text-[10px] font-medium transition-all duration-300"
-                              :class="activeTab === 'dashboard' ? 'text-red-500' : 'text-gray-500 group-hover:text-gray-300'">
-                            Profile
-                        </span>
-                    </button>
                 @else
                     {{-- Sign In --}}
                     <a href="{{ route('login') }}" wire:navigate
                        @click="activeTab = 'login'"
-                       class="relative flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 transition-all duration-300 group">
+                       class="relative flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 transition-all duration-300 group w-16">
 
-                        <div x-show="activeTab === 'login'"
-                             x-transition
-                             class="absolute -top-1 left-1/2 -translate-x-1/2 w-8 h-0.5 bg-gradient-to-r from-red-500 to-red-600 rounded-full shadow-lg shadow-red-500/50">
-                        </div>
+                        <div x-show="activeTab === 'login'" x-transition class="absolute -top-1 left-1/2 -translate-x-1/2 w-8 h-0.5 bg-gradient-to-r from-red-500 to-red-600 rounded-full shadow-lg shadow-red-500/50"></div>
 
-                        <svg class="w-6 h-6 transition-all duration-300"
-                             :class="activeTab === 'login' ? 'text-red-500 drop-shadow-lg drop-shadow-red-500/50' : 'text-gray-500 group-hover:text-gray-300'"
-                             fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                        <svg class="w-6 h-6 transition-all duration-300" :class="activeTab === 'login' ? 'text-red-500 drop-shadow-lg drop-shadow-red-500/50' : 'text-gray-500 group-hover:text-gray-300'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
                         </svg>
-                        <span class="text-[10px] font-medium transition-all duration-300"
-                              :class="activeTab === 'login' ? 'text-red-500' : 'text-gray-500 group-hover:text-gray-300'">
+                        <span class="text-[10px] font-medium transition-all duration-300" :class="activeTab === 'login' ? 'text-red-500' : 'text-gray-500 group-hover:text-gray-300'">
                             Sign In
                         </span>
                     </a>
@@ -490,7 +445,4 @@ new class extends Component
 
     {{-- Spacer for fixed top header --}}
     <div class="h-16 lg:h-20"></div>
-
-    {{-- Spacer for mobile bottom nav (only on mobile) --}}
-    <div class="lg:hidden "></div>
 </div>
