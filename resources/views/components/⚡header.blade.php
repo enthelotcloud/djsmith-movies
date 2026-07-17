@@ -492,5 +492,5 @@ new class extends Component
     <div class="h-16 lg:h-20"></div>
 
     {{-- Spacer for mobile bottom nav (only on mobile) --}}
-    <div class="lg:hidden h-24"></div>
+    <div class="lg:hidden "></div>
 </div>

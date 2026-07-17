@@ -9,6 +9,7 @@ Route::view('/about', 'about')->name('about');
 Route::view('/contact', 'contact')->name('contact');
 Route::view('/faqs', 'faqs')->name('faqs');
 
+
 Route::livewire('/search', 'pages::search-result')->name('client.search');
 Route::view('/privacy-policy', 'privacy-policy')->name('privacy');
 Route::view('/terms-of-services', 'terms-of-services')->name('terms');
@@ -80,6 +81,8 @@ Route::get('/api/video-key/{slug}', function (Request $request, $slug) {
 Route::livewire('/watch/{slug}', 'pages::player')
     ->middleware(['auth', 'secure.video'])
     ->name('client.player');
+
+Route::livewire('/category/{slug}', 'pages::category-single')->name('category.single');
 
 Route::prefix('admin')
     ->name('admin.')
