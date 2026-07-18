@@ -17,6 +17,9 @@ class extends Component
     public $isHLS = false;
     public $error = null;
 
+    // Watch Tracking
+    public $startProgress = 0;
+
     public function mount($slug)
     {
         $this->slug = $slug;
@@ -32,6 +35,19 @@ class extends Component
 
         $this->enforceSingleSession();
         $this->generateUrls();
+
+        // Fetch resume time
+        if (Auth::check()) {
+            $history = DB::table('watch_histories')
+                ->where('user_id', Auth::id())
+                ->where('movie_id', $this->movie->id)
+                ->first();
+
+            $this->startProgress = $history ? $history->progress_seconds : 0;
+        } else {
+            $cookieName = 'movie_progress_' . $this->movie->id;
+            $this->startProgress = request()->cookie($cookieName, 0);
+        }
     }
 
     public function enforceSingleSession()
@@ -65,9 +81,12 @@ class extends Component
                 $this->streamUrl = Storage::disk('b2')->temporaryUrl($path, now()->addHours(4));
             }
 
-            if ($this->movie->thumbnail_path) {
-                $this->thumbnailUrl = Storage::disk('b2')->temporaryUrl($this->movie->thumbnail_path, now()->addHours(4));
+            // Fixed Image Path Logic
+            $thumb = $this->movie->thumbnail ?? $this->movie->thumbnail_path ?? null;
+            if ($thumb) {
+                $this->thumbnailUrl = str_starts_with($thumb, 'http') ? $thumb : Storage::disk('public')->url($thumb);
             }
+
         } catch (\Exception $e) {
             $this->error = "Failed to secure stream.";
         }
@@ -76,6 +95,22 @@ class extends Component
     public function heartbeat()
     {
         DB::table('users')->where('id', Auth::id())->update(['last_active_at' => now()]);
+    }
+
+    // Watch Tracking Sync
+    public function syncProgress($seconds)
+    {
+        if (Auth::check()) {
+            DB::table('watch_histories')->updateOrInsert(
+                ['user_id' => Auth::id(), 'movie_id' => $this->movie->id],
+                [
+                    'progress_seconds' => $seconds,
+                    'is_completed' => ($this->movie->duration_in_seconds && $seconds >= ($this->movie->duration_in_seconds * 0.9)), // Mark complete if 90% watched
+                    'updated_at' => now(),
+                    'created_at' => DB::raw('COALESCE(created_at, NOW())')
+                ]
+            );
+        }
     }
 };
 ?>
@@ -89,7 +124,40 @@ class extends Component
         warningCount: 0,
         maxWarnings: 3,
 
+        // Tracking Variables
+        initialProgress: @js($startProgress),
+        movieId: @js($movie->id),
+        lastSavedTime: 0,
+
         init() {
+            const video = this.$refs.player;
+
+            // ==========================================
+            // WATCH TRACKING & RESUME
+            // ==========================================
+            video.addEventListener('loadedmetadata', () => {
+                if (this.initialProgress > 0) {
+                    video.currentTime = this.initialProgress;
+                }
+            });
+
+            video.addEventListener('timeupdate', () => {
+                let currentTime = Math.floor(video.currentTime);
+
+                // Save every 5 seconds
+                if (currentTime > 0 && currentTime % 5 === 0 && currentTime !== this.lastSavedTime) {
+                    this.lastSavedTime = currentTime;
+
+                    @auth
+                        $wire.syncProgress(currentTime);
+                    @else
+                        let expiryDate = new Date();
+                        expiryDate.setDate(expiryDate.getDate() + 30);
+                        document.cookie = `movie_progress_${this.movieId}=${currentTime}; expires=${expiryDate.toUTCString()}; path=/; SameSite=Strict`;
+                    @endauth
+                }
+            });
+
             // ==========================================
             // ANTI-PIRACY: Right Click Block
             // ==========================================
@@ -99,37 +167,42 @@ class extends Component
             });
 
             // ==========================================
-            // ANTI-PIRACY: DevTools & Keyboard Shortcuts Block
+            // ANTI-PIRACY: DevTools & Aggressive Screenshot Block
             // ==========================================
-            document.addEventListener('keydown', e => {
-                if (e.keyCode === 123) {
+            const blockKeysAndScreenshots = (e) => {
+                // Dev Tools Block
+                if (e.keyCode === 123 || (e.ctrlKey && e.shiftKey && (e.keyCode === 73 || e.keyCode === 74 || e.keyCode === 67)) || (e.ctrlKey && (e.keyCode === 85 || e.keyCode === 83 || e.keyCode === 80))) {
                     e.preventDefault();
-                    this.showWarning('Developer tools are disabled.');
+                    this.showWarning('Developer tools & actions disabled.');
                     return false;
                 }
-                if (e.ctrlKey && e.shiftKey && (e.keyCode === 73 || e.keyCode === 74 || e.keyCode === 67)) {
-                    e.preventDefault();
-                    this.showWarning('Developer tools are disabled.');
-                    return false;
-                }
-                if (e.ctrlKey && (e.keyCode === 85 || e.keyCode === 83 || e.keyCode === 80)) {
-                    e.preventDefault();
-                    this.showWarning('Action disabled.');
-                    return false;
-                }
-                if (e.keyCode === 44 || (e.metaKey && e.shiftKey && e.keyCode === 83)) {
+
+                // Aggressive Screenshot Block (PrintScreen or Cmd+Shift+3/4/5)
+                if (e.key === 'PrintScreen' || e.keyCode === 44 || (e.metaKey && e.shiftKey)) {
                     e.preventDefault();
                     this.showWarning('Screenshots are disabled.');
+
+                    // Immediately black out the video to ruin the capture frame
+                    this.isBlurred = true;
+                    setTimeout(() => { if (this.isPlaying) this.isBlurred = false; }, 2000);
+
+                    // Overwrite clipboard so they paste a warning instead of the movie frame
+                    if (navigator.clipboard) {
+                        navigator.clipboard.writeText('Content is protected. Screenshots are not allowed.');
+                    }
                     return false;
                 }
-            });
+            };
+
+            window.addEventListener('keydown', blockKeysAndScreenshots);
+            window.addEventListener('keyup', blockKeysAndScreenshots);
 
             // ==========================================
             // ANTI-SCREEN CAPTURE: Visibility Change
             // ==========================================
             document.addEventListener('visibilitychange', () => {
                 if (document.hidden && this.isPlaying) {
-                    this.$refs.player.pause();
+                    video.pause();
                     this.isBlurred = true;
                 }
             });
@@ -140,6 +213,8 @@ class extends Component
             if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
                 navigator.mediaDevices.getDisplayMedia = () => {
                     this.showWarning('Screen recording is not allowed.');
+                    // Black out screen instantly if they try to invoke recording software
+                    this.isBlurred = true;
                     return Promise.reject(new Error('Screen recording blocked'));
                 };
             }
@@ -270,7 +345,7 @@ class extends Component
      wire:poll.30s="heartbeat">
 
     {{-- Large Diagonal DRM Watermark Overlay --}}
-    <div class="pointer-events-none absolute inset-0 z-[5] flex items-center justify-center overflow-hidden">
+    <div class="pointer-events-none absolute inset-0 z-[5] flex items-center justify-center overflow-hidden" style="user-select: none; -webkit-user-select: none;">
         <div class="text-[clamp(2rem,5vw,6rem)] font-black text-white/5 -rotate-[25deg] whitespace-nowrap tracking-[0.5em] select-none uppercase">
             {{ Auth::user()->email ?? 'DJSMITH.CO.KE' }}
         </div>
@@ -290,8 +365,8 @@ class extends Component
         <video
             x-ref="player"
             id="video-player"
-            class="w-full h-full object-contain transition-all duration-500"
-            :class="isBlurred ? 'blur-3xl scale-110 grayscale' : ''"
+            class="w-full h-full object-contain transition-all duration-500 select-none"
+            :class="isBlurred ? 'blur-3xl scale-110 grayscale opacity-0' : ''"
             controls
             playsinline
             controlsList="nodownload noplaybackrate"
@@ -303,7 +378,7 @@ class extends Component
 
     {{-- Cinematic "Tap to Play" Intro Screen --}}
     <div x-show="!isPlaying"
-         class="absolute inset-0 z-20 flex flex-col items-center justify-center bg-cover bg-center transition-opacity duration-700"
+         class="absolute inset-0 z-20 flex flex-col items-center justify-center bg-cover bg-center transition-opacity duration-700 select-none"
          style="background-image: url('{{ $thumbnailUrl ?: asset('logo.png') }}');">
 
         {{-- Heavy Dark Gradient Overlay for Readability --}}
@@ -344,7 +419,7 @@ class extends Component
     </div>
 
     {{-- UI Overlay (In-Player Controls) --}}
-    <div class="absolute inset-0 z-10 pointer-events-none transition-opacity duration-500"
+    <div class="absolute inset-0 z-10 pointer-events-none transition-opacity duration-500 select-none"
          x-show="isPlaying"
          :class="ui ? 'opacity-100' : 'opacity-0'" x-cloak>
 

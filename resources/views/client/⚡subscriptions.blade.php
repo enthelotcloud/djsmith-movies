@@ -289,7 +289,6 @@ new class extends Component {
 };
 ?>
 
-{{-- UI remains exactly as provided --}}
 <div class="max-w-6xl mx-auto space-y-8 relative" x-data @notify-toast.window="alert($event.detail.message)">
 
     {{-- ACTIVE PLAN BANNER --}}
@@ -314,33 +313,59 @@ new class extends Component {
         </div>
     @endif
 
-    {{-- PLANS GRID --}}
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-        @foreach($this->plans as $plan)
-            @php
-                $isActivePlan = $this->activeSubscription && $this->activeSubscription->plan_id === $plan->id;
-                $hasActivePlan = !is_null($this->activeSubscription);
-            @endphp
+    {{-- PLANS GRID WITH PRELOADER --}}
+    <div x-data="{ loading: true }" x-init="setTimeout(() => loading = false, 800)">
 
-            <div class="bg-[#111111] border {{ $isActivePlan ? 'border-red-600 shadow-red-900/20' : 'border-slate-800 hover:border-red-600/50' }} transition-colors duration-300 rounded-2xl p-8 flex flex-col relative shadow-lg">
-                @if($plan->can_download)
-                    <div class="absolute top-0 right-0 bg-red-600 text-[10px] font-bold px-3 py-1 rounded-bl-lg text-white uppercase tracking-wider">Downloads</div>
-                @endif
+        {{-- Skeleton / Loading State --}}
+        <div x-show="loading" class="flex flex-col items-center justify-center py-20 bg-[#111111] border border-slate-800 rounded-2xl shadow-lg space-y-4">
+            <div class="w-12 h-12 border-4 border-slate-800 border-t-red-600 rounded-full animate-spin"></div>
+            <p class="text-slate-500 text-xs font-bold animate-pulse tracking-widest uppercase">Loading Plans...</p>
+        </div>
 
-                <h3 class="text-xl font-bold text-white mb-2">{{ $plan->name }}</h3>
-                <p class="text-3xl font-black text-red-600 mb-6">KES {{ number_format($plan->price, 0) }}</p>
-                <ul class="text-sm text-slate-300 space-y-3 mb-8 flex-1">
-                    <li class="flex items-center gap-2">
-                        <svg class="w-4 h-4 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
-                        Access for {{ $plan->duration_minutes < 60 ? $plan->duration_minutes . ' Mins' : floor($plan->duration_minutes / 60) . ' Hours' }}
-                    </li>
-                </ul>
+        {{-- Actual Plans Grid --}}
+        <div x-show="!loading" style="display: none;" class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            @foreach($this->plans as $plan)
+                @php
+                    $isActivePlan = $this->activeSubscription && $this->activeSubscription->plan_id === $plan->id;
+                    $hasActivePlan = !is_null($this->activeSubscription);
 
-                <button wire:click="confirmPurchase({{ $plan->id }})" class="w-full py-3.5 rounded-xl font-bold transition shadow-sm {{ $isActivePlan ? 'bg-red-900/50 text-red-500 border border-red-600/50 hover:bg-red-600 hover:text-white' : ($hasActivePlan ? 'bg-zinc-800 text-white hover:bg-red-600' : 'bg-red-600 text-white hover:bg-red-700') }}">
-                    {{ $isActivePlan ? 'Extend Plan' : ($hasActivePlan ? 'Switch to this Plan' : 'Select Plan') }}
-                </button>
-            </div>
-        @endforeach
+                    // SMART TIME CONVERSION LOGIC (Pure Blade/PHP, Backend is untouched)
+                    $mins = $plan->duration_minutes;
+                    if ($mins >= 525600) {
+                        $durationStr = floor($mins / 525600) . ' Year' . (floor($mins / 525600) > 1 ? 's' : '');
+                    } elseif ($mins >= 43200) {
+                        $durationStr = floor($mins / 43200) . ' Month' . (floor($mins / 43200) > 1 ? 's' : '');
+                    } elseif ($mins >= 10080) {
+                        $durationStr = floor($mins / 10080) . ' Week' . (floor($mins / 10080) > 1 ? 's' : '');
+                    } elseif ($mins >= 1440) {
+                        $durationStr = floor($mins / 1440) . ' Day' . (floor($mins / 1440) > 1 ? 's' : '');
+                    } elseif ($mins >= 60) {
+                        $durationStr = floor($mins / 60) . ' Hour' . (floor($mins / 60) > 1 ? 's' : '');
+                    } else {
+                        $durationStr = $mins . ' Minute' . ($mins > 1 ? 's' : '');
+                    }
+                @endphp
+
+                <div class="bg-[#111111] border {{ $isActivePlan ? 'border-red-600 shadow-red-900/20' : 'border-slate-800 hover:border-red-600/50' }} transition-colors duration-300 rounded-2xl p-8 flex flex-col relative shadow-lg">
+                    @if($plan->can_download)
+                        <div class="absolute top-0 right-0 bg-red-600 text-[10px] font-bold px-3 py-1 rounded-bl-lg text-white uppercase tracking-wider">Downloads</div>
+                    @endif
+
+                    <h3 class="text-xl font-bold text-white mb-2">{{ $plan->name }}</h3>
+                    <p class="text-3xl font-black text-red-600 mb-6">KES {{ number_format($plan->price, 0) }}</p>
+                    <ul class="text-sm text-slate-300 space-y-3 mb-8 flex-1">
+                        <li class="flex items-center gap-2">
+                            <svg class="w-4 h-4 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                            Access for {{ $durationStr }}
+                        </li>
+                    </ul>
+
+                    <button wire:click="confirmPurchase({{ $plan->id }})" class="w-full py-3.5 rounded-xl font-bold transition shadow-sm {{ $isActivePlan ? 'bg-red-900/50 text-red-500 border border-red-600/50 hover:bg-red-600 hover:text-white' : ($hasActivePlan ? 'bg-zinc-800 text-white hover:bg-red-600' : 'bg-red-600 text-white hover:bg-red-700') }}">
+                        {{ $isActivePlan ? 'Extend Plan' : ($hasActivePlan ? 'Switch to this Plan' : 'Select Plan') }}
+                    </button>
+                </div>
+            @endforeach
+        </div>
     </div>
 
     {{-- PLAN RECEIPT LEDGER --}}
