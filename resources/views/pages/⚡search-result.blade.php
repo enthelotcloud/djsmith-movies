@@ -7,6 +7,7 @@ use Livewire\Attributes\Url;
 use Livewire\WithPagination;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Auth;
 
 new #[Layout('layouts.guest.app')]
 #[Title('Search & Browse')]
@@ -19,6 +20,23 @@ class extends Component {
 
     #[Url]
     public $category = '';
+
+    // Auth & Subscriptions State
+    public $isLoggedIn = false;
+    public $hasActiveSub = false;
+
+    public function mount()
+    {
+        $this->isLoggedIn = Auth::check();
+
+        if ($this->isLoggedIn) {
+            $this->hasActiveSub = DB::table('subscriptions')
+                ->where('user_id', Auth::id())
+                ->where('status', 'active')
+                ->where('expires_at', '>', now())
+                ->exists();
+        }
+    }
 
     public function updated($property)
     {
@@ -71,6 +89,29 @@ class extends Component {
         } catch (\Exception $e) {
             return null;
         }
+    }
+
+    // ==========================================
+    // 🛡️ GATEKEEPERS (Stops the bandwidth drain)
+    // ==========================================
+    public function canWatch($movie)
+    {
+        if (!$this->isLoggedIn) return false;
+        if ($movie->is_premium && !$this->hasActiveSub) return false;
+        return true;
+    }
+
+    public function getMovieAction($movie)
+    {
+        if (!$this->isLoggedIn) {
+            return route('login');
+        }
+
+        if ($movie->is_premium && !$this->hasActiveSub) {
+            return route('client.subscriptions');
+        }
+
+        return route('client.player', ['slug' => $movie->slug]);
     }
 };
 ?>
@@ -142,7 +183,12 @@ class extends Component {
                 @else
                     <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 sm:gap-6">
                         @foreach($this->movies as $movie)
-                            <a href="{{ route('client.player', ['slug' => $movie->slug]) }}" wire:navigate class="group relative bg-[#111] rounded-2xl overflow-hidden border border-slate-800 hover:border-red-600/50 transition duration-500 shadow-lg block">
+                            @php
+                                $canPlay = $this->canWatch($movie);
+                                $actionUrl = $this->getMovieAction($movie);
+                            @endphp
+
+                            <a href="{{ $actionUrl }}" wire:navigate class="group relative bg-[#111] rounded-2xl overflow-hidden border border-slate-800 hover:border-red-600/50 transition duration-500 shadow-lg block">
 
                                 {{-- Poster --}}
                                 <div class="aspect-[2/3] w-full relative overflow-hidden bg-zinc-900">
@@ -154,7 +200,7 @@ class extends Component {
 
                                     <div class="absolute inset-0 bg-gradient-to-t from-black via-black/20 to-transparent opacity-80"></div>
 
-                                    <div class="absolute top-2 left-2 flex flex-col gap-1.5">
+                                    <div class="absolute top-2 left-2 flex flex-col gap-1.5 z-20">
                                         @if($movie->type === 'series')
                                             <span class="px-2 py-0.5 bg-indigo-600 text-white text-[8px] font-black uppercase tracking-widest rounded shadow-md w-max">Series</span>
                                         @endif
@@ -163,15 +209,32 @@ class extends Component {
                                         @endif
                                     </div>
 
-                                    <div class="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition duration-300">
-                                        <div class="w-12 h-12 bg-red-600 text-white rounded-full flex items-center justify-center shadow-[0_0_30px_rgba(220,38,38,0.6)] transform scale-90 group-hover:scale-100 transition duration-300">
-                                            <svg class="w-5 h-5 ml-1" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                                        </div>
+                                    {{-- Safe Hover Overlays --}}
+                                    <div class="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition duration-300 z-10">
+                                        @if($canPlay)
+                                            <div class="w-12 h-12 bg-red-600 text-white rounded-full flex items-center justify-center shadow-[0_0_30px_rgba(220,38,38,0.6)] transform scale-90 group-hover:scale-100 transition duration-300">
+                                                <svg class="w-5 h-5 ml-1" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                                            </div>
+                                        @elseif(!$this->isLoggedIn)
+                                            <div class="flex flex-col items-center gap-1.5 bg-black/80 backdrop-blur-sm rounded-xl px-4 py-3 border border-slate-700 group-hover:border-red-500 transition-all shadow-xl">
+                                                <svg class="w-6 h-6 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9"/>
+                                                </svg>
+                                                <span class="text-[9px] font-bold text-white uppercase tracking-wider text-center">Sign In<br>to Watch</span>
+                                            </div>
+                                        @else
+                                            <div class="flex flex-col items-center gap-1.5 bg-black/80 backdrop-blur-sm rounded-xl px-4 py-3 border border-amber-500/50 group-hover:border-amber-500 transition-all shadow-xl">
+                                                <svg class="w-6 h-6 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"/>
+                                                </svg>
+                                                <span class="text-[9px] font-bold text-amber-500 uppercase tracking-wider text-center">Subscribe<br>to Watch</span>
+                                            </div>
+                                        @endif
                                     </div>
                                 </div>
 
                                 {{-- Details --}}
-                                <div class="p-3 sm:p-4">
+                                <div class="p-3 sm:p-4 relative z-20">
                                     <h3 class="text-xs sm:text-sm font-bold text-white truncate group-hover:text-red-500 transition">{{ $movie->title }}</h3>
                                 </div>
                             </a>

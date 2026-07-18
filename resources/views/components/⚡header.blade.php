@@ -14,9 +14,22 @@ new class extends Component
     public $showMobileMenu = false;
     public $currentRoute = '';
 
+    // Auth & Subscriptions State for the search locks
+    public $isLoggedIn = false;
+    public $hasActiveSub = false;
+
     public function mount()
     {
         $this->currentRoute = request()->route()->getName();
+
+        $this->isLoggedIn = Auth::check();
+        if ($this->isLoggedIn) {
+            $this->hasActiveSub = DB::table('subscriptions')
+                ->where('user_id', Auth::id())
+                ->where('status', 'active')
+                ->where('expires_at', '>', now())
+                ->exists();
+        }
     }
 
     public function updatedSearch()
@@ -36,7 +49,8 @@ new class extends Component
                         'title' => $movie->title,
                         'slug' => $movie->slug,
                         'excerpt' => Str::limit($movie->description, 50),
-                        'poster' => $this->getPosterUrl($movie->thumbnail ?? $movie->thumbnail_path ?? null)
+                        'poster' => $this->getPosterUrl($movie->thumbnail ?? $movie->thumbnail_path ?? null),
+                        'is_premium' => $movie->is_premium // Fetched to check if we need to lock it
                     ];
                 })
                 ->toArray();
@@ -211,14 +225,36 @@ new class extends Component
                             @if(count($searchResults) > 0)
                                 <div class="p-2 space-y-1">
                                     @foreach($searchResults as $result)
-                                        <a href="{{ route('client.player', ['slug' => $result['slug']]) }}" wire:navigate class="flex items-center gap-4 p-2 hover:bg-white/5 rounded-xl transition group">
-                                            @if($result['poster'])
-                                                <img src="{{ $result['poster'] }}" class="w-10 h-14 object-cover rounded-lg shadow group-hover:scale-105 transition">
-                                            @else
-                                                <div class="w-10 h-14 bg-gray-800 rounded-lg flex items-center justify-center text-[8px] text-gray-600">No Img</div>
-                                            @endif
+                                        @php
+                                            // Determine if this result needs to be locked based on subscription
+                                            $isLocked = $result['is_premium'] && (!$isLoggedIn || !$hasActiveSub);
+                                            $actionUrl = $isLocked ? ($isLoggedIn ? route('client.subscriptions') : route('login')) : route('client.player', ['slug' => $result['slug']]);
+                                        @endphp
+
+                                        <a href="{{ $actionUrl }}" wire:navigate class="flex items-center gap-4 p-2 hover:bg-white/5 rounded-xl transition group">
+
+                                            <div class="relative w-10 h-14 flex-shrink-0">
+                                                @if($result['poster'])
+                                                    <img src="{{ $result['poster'] }}" class="w-full h-full object-cover rounded-lg shadow group-hover:scale-105 transition">
+                                                @else
+                                                    <div class="w-full h-full bg-gray-800 rounded-lg flex items-center justify-center text-[8px] text-gray-600">No Img</div>
+                                                @endif
+
+                                                {{-- 🔒 The Lock Overlay --}}
+                                                @if($isLocked)
+                                                    <div class="absolute inset-0 bg-black/60 rounded-lg flex items-center justify-center backdrop-blur-[1px]">
+                                                        <svg class="w-4 h-4 text-amber-500" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C9.243 2 7 4.243 7 7v3H6c-1.103 0-2 .897-2 2v8c0 1.103.897 2 2 2h12c1.103 0 2-.897 2-2v-8c0-1.103-.897-2-2-2h-1V7c0-2.757-2.243-5-5-5zm-3 5c0-1.654 1.346-3 3-3s3 1.346 3 3v3H9V7zm8 5v8H5v-8h14zM12 14c-1.104 0-2 .896-2 2s.896 2 2 2 2-.896 2-2-.896-2-2-2z"/></svg>
+                                                    </div>
+                                                @endif
+                                            </div>
+
                                             <div class="flex-1 overflow-hidden">
-                                                <h4 class="text-sm font-bold text-white truncate group-hover:text-red-400 transition">{{ $result['title'] }}</h4>
+                                                <div class="flex items-center gap-2">
+                                                    <h4 class="text-sm font-bold text-white truncate group-hover:text-red-400 transition">{{ $result['title'] }}</h4>
+                                                    @if($isLocked)
+                                                        <span class="text-[8px] font-bold text-amber-500 uppercase tracking-widest border border-amber-500/30 px-1 rounded">Premium</span>
+                                                    @endif
+                                                </div>
                                                 <p class="text-[11px] text-gray-500 truncate mt-0.5">{{ $result['excerpt'] }}</p>
                                             </div>
                                         </a>

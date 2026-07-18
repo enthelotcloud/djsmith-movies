@@ -4,10 +4,16 @@ use Livewire\Attributes\Layout;
 use Livewire\Attributes\Computed;
 use Livewire\Component;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Storage;
 
 new #[Layout('layouts.guest.app')] class extends Component {
     public $categoryId;
     public $categoryName;
+
+    // Auth & Subscriptions State
+    public $isLoggedIn = false;
+    public $hasActiveSub = false;
 
     // Now accepts $slug from the URL
     public function mount($slug)
@@ -21,12 +27,23 @@ new #[Layout('layouts.guest.app')] class extends Component {
 
         $this->categoryId = $category->id;
         $this->categoryName = $category->name;
+
+        // 2. Gatekeeper Checks
+        $this->isLoggedIn = Auth::check();
+
+        if ($this->isLoggedIn) {
+            $this->hasActiveSub = DB::table('subscriptions')
+                ->where('user_id', Auth::id())
+                ->where('status', 'active')
+                ->where('expires_at', '>', now())
+                ->exists();
+        }
     }
 
     #[Computed]
     public function movies()
     {
-        // 2. Fetch published movies for this category
+        // 3. Fetch published movies for this category
         return DB::table('movies')
             ->join('category_movie', 'movies.id', '=', 'category_movie.movie_id')
             ->where('category_movie.moviecategory_id', $this->categoryId)
@@ -34,6 +51,29 @@ new #[Layout('layouts.guest.app')] class extends Component {
             ->select('movies.*')
             ->orderBy('movies.created_at', 'desc')
             ->get();
+    }
+
+    // ==========================================
+    // 🛡️ GATEKEEPERS (Stops the bandwidth drain)
+    // ==========================================
+    public function canWatch($movie)
+    {
+        if (!$this->isLoggedIn) return false;
+        if ($movie->is_premium && !$this->hasActiveSub) return false;
+        return true;
+    }
+
+    public function getMovieAction($movie)
+    {
+        if (!$this->isLoggedIn) {
+            return route('login');
+        }
+
+        if ($movie->is_premium && !$this->hasActiveSub) {
+            return route('client.subscriptions');
+        }
+
+        return route('client.player', ['slug' => $movie->slug]);
     }
 };
 ?>
@@ -68,8 +108,12 @@ new #[Layout('layouts.guest.app')] class extends Component {
     @if(count($this->movies) > 0)
         <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4 md:gap-6">
             @foreach($this->movies as $movie)
-                {{-- 🚨 FIXED: Now points to client.player 🚨 --}}
-                <a href="{{ route('client.player', ['slug' => $movie->slug]) }}" wire:navigate class="group flex flex-col gap-3 outline-none">
+                @php
+                    $canPlay = $this->canWatch($movie);
+                    $actionUrl = $this->getMovieAction($movie);
+                @endphp
+
+                <a href="{{ $actionUrl }}" wire:navigate class="group flex flex-col gap-3 outline-none">
 
                     <div class="relative aspect-[2/3] rounded-2xl overflow-hidden bg-[#111111] border border-slate-800 shadow-xl group-focus:ring-2 group-focus:ring-red-600 transition">
 
@@ -90,22 +134,38 @@ new #[Layout('layouts.guest.app')] class extends Component {
 
                         {{-- Premium Badge --}}
                         @if($movie->is_premium)
-                            <div class="absolute top-3 right-3 bg-amber-500 text-black text-[9px] font-black px-2 py-1 rounded shadow-lg uppercase tracking-widest border border-amber-400">
+                            <div class="absolute top-3 right-3 bg-amber-500 text-black text-[9px] font-black px-2 py-1 rounded shadow-lg uppercase tracking-widest border border-amber-400 z-20">
                                 Premium
                             </div>
                         @endif
 
                         {{-- Duration Badge --}}
-                        <div class="absolute bottom-3 right-3 text-[10px] font-bold text-white bg-black/70 backdrop-blur-md px-2.5 py-1 rounded-md border border-white/10 shadow-lg flex items-center gap-1.5">
+                        <div class="absolute bottom-3 right-3 text-[10px] font-bold text-white bg-black/70 backdrop-blur-md px-2.5 py-1 rounded-md border border-white/10 shadow-lg flex items-center gap-1.5 z-20">
                             <svg class="w-3 h-3 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                             {{ floor($movie->duration_in_seconds / 60) }}m
                         </div>
 
-                        {{-- Hover Play Button --}}
-                        <div class="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-75 group-hover:scale-100">
-                            <div class="w-14 h-14 bg-red-600/90 backdrop-blur-sm rounded-full flex items-center justify-center shadow-[0_0_30px_rgba(220,38,38,0.5)] text-white pl-1 border border-red-500">
-                                <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20"><path d="M4 4l12 6-12 6z"/></svg>
-                            </div>
+                        {{-- Safe Hover Overlays --}}
+                        <div class="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition duration-300 z-10">
+                            @if($canPlay)
+                                <div class="w-14 h-14 bg-red-600/90 backdrop-blur-sm text-white rounded-full flex items-center justify-center shadow-[0_0_30px_rgba(220,38,38,0.6)] transform scale-90 group-hover:scale-100 transition duration-300 border border-red-500">
+                                    <svg class="w-6 h-6 ml-1" fill="currentColor" viewBox="0 0 20 20"><path d="M4 4l12 6-12 6z"/></svg>
+                                </div>
+                            @elseif(!$this->isLoggedIn)
+                                <div class="flex flex-col items-center gap-1.5 bg-black/80 backdrop-blur-sm rounded-xl px-4 py-3 border border-slate-700 group-hover:border-red-500 transition-all shadow-xl transform scale-90 group-hover:scale-100">
+                                    <svg class="w-6 h-6 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9"/>
+                                    </svg>
+                                    <span class="text-[9px] font-bold text-white uppercase tracking-wider text-center">Sign In<br>to Watch</span>
+                                </div>
+                            @else
+                                <div class="flex flex-col items-center gap-1.5 bg-black/80 backdrop-blur-sm rounded-xl px-4 py-3 border border-amber-500/50 group-hover:border-amber-500 transition-all shadow-xl transform scale-90 group-hover:scale-100">
+                                    <svg class="w-6 h-6 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"/>
+                                    </svg>
+                                    <span class="text-[9px] font-bold text-amber-500 uppercase tracking-wider text-center">Subscribe<br>to Watch</span>
+                                </div>
+                            @endif
                         </div>
                     </div>
 
