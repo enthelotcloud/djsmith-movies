@@ -19,30 +19,97 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::view('dashboard', 'dashboard')->name('dashboard');
 });
 
-// 1. Manifest Proxy
-Route::get('/api/stream/{slug}/manifest.m3u8', function ($slug) {
-    $movie = DB::table('movies')->where('slug', $slug)->first();
-    if (!$movie) abort(404);
+// // 1. Manifest Proxy
+// Route::get('/api/stream/{slug}/manifest.m3u8', function ($slug) {
+//     $movie = DB::table('movies')->where('slug', $slug)->first();
+//     if (!$movie) abort(404);
 
-    if (!Storage::disk('b2')->exists($movie->video_path)) {
-        Log::error("Manifest path missing: " . $movie->video_path);
+//     if (!Storage::disk('b2')->exists($movie->video_path)) {
+//         Log::error("Manifest path missing: " . $movie->video_path);
+//         abort(404, "Manifest file not found.");
+//     }
+
+//     $manifestContent = Storage::disk('b2')->get($movie->video_path);
+
+//     // Generate Burner Token (valid for 30s)
+//     $token = Str::random(32);
+//     Cache::put('key_token_' . $token, true, now()->addSeconds(30));
+//     $keyUrl = route('video.key', ['slug' => $slug]) . '?t=' . $token;
+
+//     // Inject Key
+//     $manifestContent = preg_replace('/#EXT-X-KEY:METHOD=AES-128,URI="[^"]+"/', '#EXT-X-KEY:METHOD=AES-128,URI="' . $keyUrl . '"', $manifestContent);
+
+//     // Inject Chunk URLs
+//     $bucket = config('filesystems.disks.b2.bucket');
+//     $endpoint = str_replace('https://', '', config('filesystems.disks.b2.endpoint'));
+//     $baseDir = dirname($movie->video_path);
+//     $backblazeBaseUrl = "https://{$bucket}.{$endpoint}/" . ($baseDir !== '.' ? $baseDir . '/' : '');
+//     $manifestContent = preg_replace('/^(?!#)(?!http)(.+)$/m', $backblazeBaseUrl . '$1', $manifestContent);
+
+//     return response($manifestContent, 200, [
+//         'Content-Type' => 'application/vnd.apple.mpegurl',
+//         'Cache-Control' => 'no-cache, no-store, must-revalidate'
+//     ]);
+// })->middleware(['auth', 'secure.video'])->name('stream.manifest');
+
+// // 2. Single Source of Truth for Decryption Key
+// Route::get('/api/video-key/{slug}', function (Request $request, $slug) {
+//     $token = $request->query('t');
+
+//     // Check if the burner token is valid
+//     if (!$token || !Cache::has('key_token_' . $token)) {
+//         abort(403, 'Key token expired or invalid.');
+//     }
+
+//     $movie = DB::table('movies')->where('slug', $slug)->first();
+
+//     // BUILD THE ABSOLUTE OS PATH DIRECTLY
+//     $absolutePath = storage_path("app/video_keys/{$movie->slug}.key");
+
+//     // USE NATIVE PHP TO CHECK THE FILE (Bypasses Laravel's disk config)
+//     if (!file_exists($absolutePath)) {
+//         Log::error("OS cannot find key at: " . $absolutePath);
+//         abort(404, 'Key file missing on server.');
+//     }
+
+//     // Serve the file directly from the OS
+//     return response()->file($absolutePath, [
+//         'Content-Type' => 'application/octet-stream',
+//         'Cache-Control' => 'no-cache, no-store, must-revalidate',
+//     ]);
+// })->middleware(['auth'])->name('video.key');
+
+// 1. Manifest Proxy (Updated to support Movies & Episodes)
+Route::get('/api/stream/{slug}/manifest.m3u8', function ($slug) {
+    // 1. DYNAMIC LOOKUP: Check movies, then episodes
+    $media = DB::table('movies')->where('slug', $slug)->first()
+             ?? DB::table('episodes')->where('slug', $slug)->first();
+
+    if (!$media) {
+        Log::error("Manifest requested for non-existent media: " . $slug);
+        abort(404, "Media not found.");
+    }
+
+    // 2. CHECK FILE
+    if (!Storage::disk('b2')->exists($media->video_path)) {
+        Log::error("Manifest path missing: " . $media->video_path);
         abort(404, "Manifest file not found.");
     }
 
-    $manifestContent = Storage::disk('b2')->get($movie->video_path);
+    $manifestContent = Storage::disk('b2')->get($media->video_path);
 
-    // Generate Burner Token (valid for 30s)
+    // 3. GENERATE TOKEN
     $token = Str::random(32);
     Cache::put('key_token_' . $token, true, now()->addSeconds(30));
     $keyUrl = route('video.key', ['slug' => $slug]) . '?t=' . $token;
 
-    // Inject Key
+    // 4. INJECT KEY
     $manifestContent = preg_replace('/#EXT-X-KEY:METHOD=AES-128,URI="[^"]+"/', '#EXT-X-KEY:METHOD=AES-128,URI="' . $keyUrl . '"', $manifestContent);
 
-    // Inject Chunk URLs
+    // 5. INJECT CHUNK URLS
     $bucket = config('filesystems.disks.b2.bucket');
     $endpoint = str_replace('https://', '', config('filesystems.disks.b2.endpoint'));
-    $baseDir = dirname($movie->video_path);
+    $baseDir = dirname($media->video_path);
     $backblazeBaseUrl = "https://{$bucket}.{$endpoint}/" . ($baseDir !== '.' ? $baseDir . '/' : '');
     $manifestContent = preg_replace('/^(?!#)(?!http)(.+)$/m', $backblazeBaseUrl . '$1', $manifestContent);
 
@@ -52,7 +119,7 @@ Route::get('/api/stream/{slug}/manifest.m3u8', function ($slug) {
     ]);
 })->middleware(['auth', 'secure.video'])->name('stream.manifest');
 
-// 2. Single Source of Truth for Decryption Key
+// 2. Single Source of Truth for Decryption Key (Updated for Movies & Episodes)
 Route::get('/api/video-key/{slug}', function (Request $request, $slug) {
     $token = $request->query('t');
 
@@ -61,12 +128,20 @@ Route::get('/api/video-key/{slug}', function (Request $request, $slug) {
         abort(403, 'Key token expired or invalid.');
     }
 
-    $movie = DB::table('movies')->where('slug', $slug)->first();
+    // 1. LOOKUP: Try movies, fallback to episodes
+    $media = DB::table('movies')->where('slug', $slug)->first()
+             ?? DB::table('episodes')->where('slug', $slug)->first();
 
-    // BUILD THE ABSOLUTE OS PATH DIRECTLY
-    $absolutePath = storage_path("app/video_keys/{$movie->slug}.key");
+    if (!$media) {
+        Log::error("Key Request Failed: Media not found for slug: " . $slug);
+        abort(404, 'Media not found.');
+    }
 
-    // USE NATIVE PHP TO CHECK THE FILE (Bypasses Laravel's disk config)
+    // 2. BUILD THE ABSOLUTE OS PATH
+    // We use $media->slug to ensure the filename matches regardless of where it was found
+    $absolutePath = storage_path("app/video_keys/{$media->slug}.key");
+
+    // 3. USE NATIVE PHP TO CHECK THE FILE
     if (!file_exists($absolutePath)) {
         Log::error("OS cannot find key at: " . $absolutePath);
         abort(404, 'Key file missing on server.');
