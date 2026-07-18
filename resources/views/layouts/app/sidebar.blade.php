@@ -33,15 +33,15 @@
                         {{ __('Movies') }}
                     </flux:sidebar.item>
 
-                    <flux:sidebar.item icon="video-camera" :href="route('admin.series')" :current="request()->routeIs('admin.series')" wire:navigate>
+                    <flux:sidebar.item icon="archive-box" :href="route('admin.series')" :current="request()->routeIs('admin.series')" wire:navigate>
                         {{ __('Series') }}
                     </flux:sidebar.item>
 
-                    <flux:sidebar.item icon="video-camera" :href="route('admin.seasons')" :current="request()->routeIs('admin.seasons')" wire:navigate>
+                    <flux:sidebar.item icon="folder-open" :href="route('admin.seasons')" :current="request()->routeIs('admin.seasons')" wire:navigate>
                         {{ __('Seasons') }}
                     </flux:sidebar.item>
 
-                    <flux:sidebar.item icon="video-camera" :href="route('admin.episodes')" :current="request()->routeIs('admin.episodes')" wire:navigate>
+                    <flux:sidebar.item icon="film" :href="route('admin.episodes')" :current="request()->routeIs('admin.episodes')" wire:navigate>
                         {{ __('Episodes') }}
                     </flux:sidebar.item>
 
