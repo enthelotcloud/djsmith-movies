@@ -7,6 +7,7 @@ use Livewire\Attributes\Title;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Carbon\Carbon;
 
 new #[Title('Dj Smith Movies - Stream Unlimited')]
@@ -118,6 +119,17 @@ class extends Component
         return $this->movies->take(8);
     }
 
+    // NEW: Fetch latest active series
+    #[Computed]
+    public function latestSeries()
+    {
+        return DB::table('series')
+            ->whereIn('status', ['ready', 'ongoing', 'completed'])
+            ->orderBy('created_at', 'desc')
+            ->take(8)
+            ->get();
+    }
+
     public function getMoviesByCategory($categoryId)
     {
         return DB::table('movies')
@@ -166,6 +178,18 @@ class extends Component
         }
 
         return route('client.player', ['slug' => $movie->slug]);
+    }
+
+    // NEW: Get Series Action (Locks if not logged in)
+    public function getSeriesAction($series)
+    {
+        if (!$this->isLoggedIn) {
+            return route('login');
+        }
+
+        // Assuming you will create a series overview page that lists the seasons/episodes
+        // Fallback to home if the route doesn't exist yet, but you should create a 'client.series.show' route
+        return route('client.series.show', ['slug' => $series->slug]);
     }
 };
 ?>
@@ -439,13 +463,13 @@ class extends Component
             </section>
         @endif
 
-        {{-- 🎯 LATEST RELEASES --}}
+        {{-- 🎯 LATEST MOVIES --}}
         @if($this->latestMovies->isNotEmpty())
             <section>
                 <div class="flex items-center justify-between mb-8">
                     <div class="flex items-center gap-4">
                         <span class="w-1 h-8 bg-red-600 rounded-full"></span>
-                        <h2 class="text-2xl sm:text-3xl font-black text-white tracking-tight">Latest Releases</h2>
+                        <h2 class="text-2xl sm:text-3xl font-black text-white tracking-tight">Latest Movies</h2>
                     </div>
                 </div>
 
@@ -476,13 +500,6 @@ class extends Component
 
                                 {{-- Gradient Overlay --}}
                                 <div class="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent"></div>
-
-                                {{-- Badges --}}
-                                <div class="absolute top-3 left-3 flex flex-col gap-1 z-20">
-                                    @if($movie->type === 'series')
-                                        <span class="px-2 py-1 bg-purple-600 text-white text-[9px] font-black uppercase tracking-widest rounded-md">Series</span>
-                                    @endif
-                                </div>
 
                                 @if($movie->is_premium)
                                     <div class="absolute top-3 right-3 z-20">
@@ -532,7 +549,7 @@ class extends Component
                                     {{ $movie->title }}
                                 </h3>
                                 <div class="flex items-center gap-2 mt-1">
-                                    <span class="text-xs text-slate-500">{{ $movie->type === 'series' ? 'Series' : 'Movie' }}</span>
+                                    <span class="text-xs text-slate-500">Movie</span>
                                     @if(isset($movie->release_year) && $movie->release_year)
                                         <span class="text-xs text-slate-700">•</span>
                                         <span class="text-xs text-slate-500">{{ $movie->release_year }}</span>
@@ -601,6 +618,86 @@ class extends Component
                                 </p>
                             </div>
                         </a>
+                    @endforeach
+                </div>
+            </section>
+        @endif
+
+        {{-- 📺 TRENDING SERIES SECTION --}}
+        @if($this->latestSeries->isNotEmpty())
+            <section>
+                <div class="flex items-center justify-between mb-8">
+                    <div class="flex items-center gap-4">
+                        <span class="w-1 h-8 bg-red-600 rounded-full"></span>
+                        <h2 class="text-2xl sm:text-3xl font-black text-white tracking-tight">Trending Series</h2>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+                    @foreach($this->latestSeries as $show)
+                        @php
+                            $actionUrl = $this->getSeriesAction($show);
+                            $showPoster = $show->poster ?? null;
+                        @endphp
+
+                        <div class="group relative bg-zinc-900 rounded-2xl overflow-hidden border border-slate-800 hover:border-red-500/50 transition-all duration-500 hover:scale-[1.02]">
+
+                            {{-- Poster --}}
+                            <div class="aspect-[2/3] w-full relative overflow-hidden">
+                                @if($showPoster)
+                                    <img src="{{ str_starts_with($showPoster, 'http') ? $showPoster : Storage::disk('public')->url($showPoster) }}"
+                                         class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700"
+                                         alt="{{ $show->title }}"
+                                         loading="lazy">
+                                @else
+                                    <div class="w-full h-full bg-zinc-800 flex items-center justify-center">
+                                        <svg class="w-12 h-12 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
+                                        </svg>
+                                    </div>
+                                @endif
+
+                                {{-- Gradient Overlay --}}
+                                <div class="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent"></div>
+
+                                {{-- TV Series Badge --}}
+                                <div class="absolute top-3 left-3 z-20">
+                                    <span class="px-2 py-1 bg-indigo-600 text-white text-[9px] font-black uppercase tracking-widest rounded-md shadow-lg border border-indigo-500">TV Series</span>
+                                </div>
+
+                                {{-- Hover Overlay --}}
+                                <div class="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 z-10">
+                                    @if($this->isLoggedIn)
+                                        <a href="{{ $actionUrl }}"
+                                           wire:navigate
+                                           class="flex flex-col items-center gap-2 bg-black/80 backdrop-blur rounded-xl px-6 py-4 border border-slate-700 hover:border-red-500 transition-all shadow-xl hover:scale-105">
+                                            <svg class="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" />
+                                            </svg>
+                                            <span class="text-xs font-bold text-white uppercase tracking-wider">View Episodes</span>
+                                        </a>
+                                    @else
+                                        <a href="{{ $actionUrl }}"
+                                           class="flex flex-col items-center gap-2 bg-black/80 backdrop-blur rounded-xl px-6 py-4 border border-slate-700 hover:border-red-500 transition-all shadow-xl">
+                                            <svg class="w-8 h-8 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9"/>
+                                            </svg>
+                                            <span class="text-xs font-bold text-white uppercase tracking-wider">Sign In to Watch</span>
+                                        </a>
+                                    @endif
+                                </div>
+                            </div>
+
+                            {{-- Series Info --}}
+                            <div class="p-3">
+                                <h3 class="text-sm font-bold text-white truncate group-hover:text-red-500 transition">
+                                    {{ $show->title }}
+                                </h3>
+                                <div class="flex items-center gap-2 mt-1">
+                                    <span class="text-xs text-slate-500 capitalize">{{ $show->status === 'ready' ? 'Complete' : $show->status }}</span>
+                                </div>
+                            </div>
+                        </div>
                     @endforeach
                 </div>
             </section>

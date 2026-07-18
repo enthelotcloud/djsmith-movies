@@ -83,6 +83,10 @@ Route::livewire('/watch/{slug}', 'pages::player')
     ->middleware(['auth', 'secure.video'])
     ->name('client.player');
 
+Route::livewire('/series/watch/{slug}', 'pages::series-player')
+    ->middleware(['auth', 'secure.video'])
+    ->name('client.series.player');
+
 Route::livewire('/category/{slug}', 'pages::category-single')->name('category.single');
 
 Route::prefix('admin')
@@ -94,6 +98,9 @@ Route::prefix('admin')
     Route::livewire('/dashboard', 'admin::dashboard')->name('dashboard');
     Route::livewire('/plans', 'admin::plan-manager')->name('plans');
     Route::livewire('/movies', 'admin::movie-manager')->name('movies');
+    Route::livewire('/episodes', 'admin::episodes-manager')->name('episodes');
+    Route::livewire('/seasons', 'admin::seasons-manager')->name('seasons');
+    Route::livewire('/series', 'admin::series-manager')->name('series');
     Route::livewire('/categories', 'admin::category-manager')->name('categories');
 });
 
@@ -105,6 +112,8 @@ Route::prefix('client')
     Route::livewire('/dashboard', 'client::dashboard')->name('dashboard');
     Route::livewire('/wallet-topup', 'client::wallet-topup')->name('wallet-topup');
     Route::livewire('/subscriptions', 'client::subscriptions')->name('subscriptions');
+    Route::livewire('/series/{slug}', 'pages::series-show')->name('series.show');
+
 });
 
 Route::prefix('staff')
