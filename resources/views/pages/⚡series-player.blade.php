@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\{DB, Auth, Storage, Log};
 use Carbon\Carbon;
 
 new #[Layout('layouts.guest.app')]
+#[Title('Now Playing')]
 class extends Component
 {
     public $slug;
@@ -30,19 +31,19 @@ class extends Component
 
         if (!$this->episode) abort(404);
 
-        // Fetch relationship metadata
+        // Fetch relationship metadata (Season & Series Info)
         $seasonPivot = DB::table('episode_season')
             ->join('seasons', 'episode_season.season_id', '=', 'seasons.id')
             ->join('series', 'seasons.series_id', '=', 'series.id')
             ->where('episode_season.episode_id', $this->episode->id)
-            ->select('seasons.id as season_id', 'seasons.name as season_name', 'series.title as series_title')
+            ->select('seasons.id as season_id', 'seasons.name as season_name', 'series.title as series_title', 'series.poster as series_poster')
             ->first();
 
         if ($seasonPivot) {
             $this->season = $seasonPivot;
             $this->series = $seasonPivot;
 
-            // Find the NEXT episode in this season (ordered by ID)
+            // Find the NEXT episode in this season
             $nextEpisode = DB::table('episode_season')
                 ->join('episodes', 'episode_season.episode_id', '=', 'episodes.id')
                 ->where('episode_season.season_id', $this->season->season_id)
@@ -81,11 +82,6 @@ class extends Component
         }
     }
 
-    #[Title('Now Playing')]
-    public function getTitle() {
-        return $this->series ? "{$this->series->series_title} - {$this->episode->title}" : $this->episode->title;
-    }
-
     public function enforceSingleSession()
     {
         $user = Auth::user();
@@ -112,13 +108,13 @@ class extends Component
         try {
             if ($this->isHLS) {
                 // Route through your secure Laravel proxy to defeat IDM
-                $this->streamUrl = route('stream.manifest', ['slug' => $this->slug]); // You may need to adapt your proxy to handle episodes
+                $this->streamUrl = route('stream.manifest', ['slug' => $this->slug]);
             } else {
                 $this->streamUrl = Storage::disk('b2')->temporaryUrl($path, now()->addHours(4));
             }
 
-            // Image Path Logic
-            $thumb = $this->episode->thumbnail ?? null;
+            // Image Path Logic (Fallback to Series Poster if Episode thumbnail is missing)
+            $thumb = $this->episode->thumbnail ?? $this->episode->thumbnail_path ?? ($this->series->series_poster ?? null);
             if ($thumb) {
                 $this->thumbnailUrl = str_starts_with($thumb, 'http') ? $thumb : Storage::disk('public')->url($thumb);
             }
@@ -133,7 +129,7 @@ class extends Component
         DB::table('users')->where('id', Auth::id())->update(['last_active_at' => now()]);
     }
 
-    // Watch Tracking Sync
+    // Watch Tracking Sync (To Episode Histories Table)
     public function syncProgress($seconds)
     {
         if (Auth::check()) {
@@ -226,18 +222,26 @@ class extends Component
             // ANTI-PIRACY: DevTools & Aggressive Screenshot Block
             // ==========================================
             const blockKeysAndScreenshots = (e) => {
+                // Dev Tools Block
                 if (e.keyCode === 123 || (e.ctrlKey && e.shiftKey && (e.keyCode === 73 || e.keyCode === 74 || e.keyCode === 67)) || (e.ctrlKey && (e.keyCode === 85 || e.keyCode === 83 || e.keyCode === 80))) {
                     e.preventDefault();
                     this.showWarning('Developer tools & actions disabled.');
                     return false;
                 }
 
+                // Aggressive Screenshot Block (PrintScreen or Cmd+Shift+3/4/5)
                 if (e.key === 'PrintScreen' || e.keyCode === 44 || (e.metaKey && e.shiftKey)) {
                     e.preventDefault();
                     this.showWarning('Screenshots are disabled.');
+
+                    // Immediately black out the video to ruin the capture frame
                     this.isBlurred = true;
                     setTimeout(() => { if (this.isPlaying) this.isBlurred = false; }, 2000);
-                    if (navigator.clipboard) navigator.clipboard.writeText('Content is protected. Screenshots are not allowed.');
+
+                    // Overwrite clipboard so they paste a warning instead of the movie frame
+                    if (navigator.clipboard) {
+                        navigator.clipboard.writeText('Content is protected. Screenshots are not allowed.');
+                    }
                     return false;
                 }
             };
@@ -245,6 +249,9 @@ class extends Component
             window.addEventListener('keydown', blockKeysAndScreenshots);
             window.addEventListener('keyup', blockKeysAndScreenshots);
 
+            // ==========================================
+            // ANTI-SCREEN CAPTURE: Visibility Change
+            // ==========================================
             document.addEventListener('visibilitychange', () => {
                 if (document.hidden && this.isPlaying) {
                     video.pause();
@@ -252,9 +259,13 @@ class extends Component
                 }
             });
 
+            // ==========================================
+            // ANTI-SCREEN RECORDING: MediaRecorder Detection
+            // ==========================================
             if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
                 navigator.mediaDevices.getDisplayMedia = () => {
                     this.showWarning('Screen recording is not allowed.');
+                    // Black out screen instantly if they try to invoke recording software
                     this.isBlurred = true;
                     return Promise.reject(new Error('Screen recording blocked'));
                 };
@@ -276,14 +287,15 @@ class extends Component
                 this.setupPlayer();
             }
 
+            // Lock body scroll
             document.body.style.overflow = 'hidden';
             document.documentElement.style.overflow = 'hidden';
         },
 
         goToNextEpisode() {
             if(this.nextEpisodeSlug) {
-                // Adjust route name to match your routes
-                window.location.href = `/series/watch/${this.nextEpisodeSlug}`;
+                // Ensure it points to the client prefix correctly
+                window.location.href = `/client/series/watch/${this.nextEpisodeSlug}`;
             }
         },
 
@@ -354,16 +366,26 @@ class extends Component
             const container = this.$refs.container;
 
             try {
-                if (container.requestFullscreen) await container.requestFullscreen();
-                else if (container.webkitRequestFullscreen) await container.webkitRequestFullscreen();
-                else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+                // 1. Enter Fullscreen
+                if (container.requestFullscreen) {
+                    await container.requestFullscreen();
+                } else if (container.webkitRequestFullscreen) {
+                    await container.webkitRequestFullscreen();
+                } else if (video.webkitEnterFullscreen) {
+                    video.webkitEnterFullscreen();
+                }
 
+                // 2. Lock to Landscape (Android/Chrome/Modern Browsers)
                 if (screen.orientation && screen.orientation.lock) {
                     await screen.orientation.lock('landscape');
                 }
-            } catch (err) {}
+            } catch (err) {
+                console.warn('Orientation lock not supported on this OS/Browser.', err);
+            }
 
             video.play().catch(e => {
+                console.error('Play failed:', e);
+                // Fallback: try again without fullscreen lock logic
                 video.play();
             });
             this.hideUI();
@@ -389,12 +411,16 @@ class extends Component
     </div>
 
     {{-- Anti-Piracy Warning Toast --}}
-    <div x-ref="warning" class="fixed top-6 left-1/2 -translate-x-1/2 z-50 px-6 py-3 bg-red-600/95 backdrop-blur-md text-white font-bold text-sm rounded-xl shadow-2xl border border-red-400/30 transition-all duration-500 opacity-0 translate-y-4 pointer-events-none">
+    <div x-ref="warning"
+         class="fixed top-6 left-1/2 -translate-x-1/2 z-50 px-6 py-3 bg-red-600/95 backdrop-blur-md text-white font-bold text-sm rounded-xl shadow-2xl border border-red-400/30 transition-all duration-500 opacity-0 translate-y-4 pointer-events-none">
         <span x-ref="warningText"></span>
     </div>
 
     {{-- Robust Player Container --}}
-    <div x-ref="container" class="absolute inset-0 flex items-center justify-center bg-black" wire:ignore>
+    <div x-ref="container"
+         class="absolute inset-0 flex items-center justify-center bg-black"
+         wire:ignore>
+
         <video
             x-ref="player"
             id="video-player"
@@ -414,14 +440,18 @@ class extends Component
          class="absolute inset-0 z-20 flex flex-col items-center justify-center bg-cover bg-center transition-opacity duration-700 select-none"
          style="background-image: url('{{ $thumbnailUrl ?: asset('logo.png') }}');">
 
+        {{-- Heavy Dark Gradient Overlay for Readability --}}
         <div class="absolute inset-0 bg-gradient-to-t from-[#0a0a0a] via-[#0a0a0a]/80 to-transparent backdrop-blur-[2px]"></div>
 
         <div class="relative z-30 flex flex-col items-center text-center px-6 mt-20 sm:mt-32 max-w-3xl">
-            <button @click="startPlayback()" class="w-20 h-20 sm:w-24 sm:h-24 bg-red-600 hover:bg-red-500 text-white rounded-full flex items-center justify-center transition-all duration-300 shadow-[0_0_40px_rgba(220,38,38,0.5)] transform hover:scale-110">
+            {{-- Big Play Button --}}
+            <button @click="startPlayback()"
+                    class="w-20 h-20 sm:w-24 sm:h-24 bg-red-600 hover:bg-red-500 text-white rounded-full flex items-center justify-center transition-all duration-300 shadow-[0_0_40px_rgba(220,38,38,0.5)] transform hover:scale-110">
                 <svg class="w-10 h-10 ml-2" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
             </button>
             <p class="mt-6 text-slate-300 font-bold tracking-widest text-[10px] sm:text-xs uppercase drop-shadow-md">Tap to Stream</p>
 
+            {{-- Series Title & Episode Title --}}
             <h1 class="mt-6 sm:mt-8 text-4xl md:text-5xl font-black text-white drop-shadow-2xl leading-tight tracking-tight">
                 {{ $series ? $series->series_title : '' }} <br/>
                 <span class="text-2xl md:text-3xl text-red-500">{{ $episode->title }}</span>
@@ -437,11 +467,20 @@ class extends Component
                 @else
                     <span class="text-emerald-400 bg-emerald-400/10 px-2 py-1 rounded border border-emerald-400/20 uppercase tracking-widest">Free</span>
                 @endif
+
+                @if($episode->duration_in_seconds)
+                    <span>{{ floor($episode->duration_in_seconds / 60) }} MIN</span>
+                @endif
+                <span class="uppercase">EPISODE</span>
             </div>
 
             @if($episode->excerpt)
                 <p class="mt-4 sm:mt-6 text-slate-400 text-sm md:text-base leading-relaxed drop-shadow max-w-2xl line-clamp-3">
                     {{ $episode->excerpt }}
+                </p>
+            @elseif($episode->description)
+                <p class="mt-4 sm:mt-6 text-slate-400 text-sm md:text-base leading-relaxed drop-shadow max-w-2xl line-clamp-3">
+                    {{ $episode->description }}
                 </p>
             @endif
         </div>
@@ -453,14 +492,15 @@ class extends Component
          :class="ui ? 'opacity-100' : 'opacity-0'" x-cloak>
 
         <div class="p-4 sm:p-6 flex gap-3">
-            <a href="{{ route('home') }}" wire:navigate class="pointer-events-auto inline-flex items-center gap-2 bg-black/50 px-4 py-2 rounded-full border border-white/10 text-sm font-bold backdrop-blur-md hover:bg-black/80 transition shadow-lg">
+            <a href="{{ route('home') }}" wire:navigate
+               class="pointer-events-auto inline-flex items-center gap-2 bg-black/50 px-4 py-2 rounded-full border border-white/10 text-sm font-bold backdrop-blur-md hover:bg-black/80 transition shadow-lg">
                 <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
                 </svg>
                 Back to Browse
             </a>
 
-            {{-- Manual Next Button (Visible only when UI is active) --}}
+            {{-- Manual Next Button --}}
             @if($nextEpisodeSlug)
                 <button @click="goToNextEpisode()" class="pointer-events-auto inline-flex items-center gap-2 bg-red-600/90 px-4 py-2 rounded-full border border-red-500/50 text-sm font-bold backdrop-blur-md hover:bg-red-500 transition shadow-[0_0_15px_rgba(220,38,38,0.4)]">
                     Next Episode

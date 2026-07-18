@@ -79,18 +79,13 @@ Route::middleware(['auth', 'verified'])->group(function () {
 //     ]);
 // })->middleware(['auth'])->name('video.key');
 
-// 1. Manifest Proxy (Updated to support Movies & Episodes)
+// 1. Manifest Proxy (Bulletproof Edition for Movies & Episodes)
 Route::get('/api/stream/{slug}/manifest.m3u8', function ($slug) {
-    // 1. DYNAMIC LOOKUP: Check movies, then episodes
     $media = DB::table('movies')->where('slug', $slug)->first()
              ?? DB::table('episodes')->where('slug', $slug)->first();
 
-    if (!$media) {
-        Log::error("Manifest requested for non-existent media: " . $slug);
-        abort(404, "Media not found.");
-    }
+    if (!$media) abort(404, "Media not found.");
 
-    // 2. CHECK FILE
     if (!Storage::disk('b2')->exists($media->video_path)) {
         Log::error("Manifest path missing: " . $media->video_path);
         abort(404, "Manifest file not found.");
@@ -98,19 +93,24 @@ Route::get('/api/stream/{slug}/manifest.m3u8', function ($slug) {
 
     $manifestContent = Storage::disk('b2')->get($media->video_path);
 
-    // 3. GENERATE TOKEN
+    // 🚨 BUG FIX 1: Strip Windows Carriage Returns so chunk URLs don't break with %0D
+    $manifestContent = str_replace("\r", "", $manifestContent);
+
+    // Generate Burner Token
     $token = Str::random(32);
     Cache::put('key_token_' . $token, true, now()->addSeconds(30));
     $keyUrl = route('video.key', ['slug' => $slug]) . '?t=' . $token;
 
-    // 4. INJECT KEY
-    $manifestContent = preg_replace('/#EXT-X-KEY:METHOD=AES-128,URI="[^"]+"/', '#EXT-X-KEY:METHOD=AES-128,URI="' . $keyUrl . '"', $manifestContent);
+    // 🚨 BUG FIX 2: Bulletproof Regex (Handles ANY order of the EXT-X-KEY tags)
+    $manifestContent = preg_replace('/(#EXT-X-KEY:.*?)URI="[^"]+"/', '$1URI="' . $keyUrl . '"', $manifestContent);
 
-    // 5. INJECT CHUNK URLS
+    // Inject Chunk URLs
     $bucket = config('filesystems.disks.b2.bucket');
     $endpoint = str_replace('https://', '', config('filesystems.disks.b2.endpoint'));
     $baseDir = dirname($media->video_path);
     $backblazeBaseUrl = "https://{$bucket}.{$endpoint}/" . ($baseDir !== '.' ? $baseDir . '/' : '');
+
+    // Inject Backblaze URL to chunks
     $manifestContent = preg_replace('/^(?!#)(?!http)(.+)$/m', $backblazeBaseUrl . '$1', $manifestContent);
 
     return response($manifestContent, 200, [
@@ -213,5 +213,22 @@ Route::prefix('staff')
 //         'files_in_this_folder' => Storage::disk('local')->files('video_keys')
 //     ]);
 // });
+
+Route::get('/debug-episode/{slug}', function ($slug) {
+    $episode = DB::table('episodes')->where('slug', $slug)->first();
+    if (!$episode) return "Episode not found in database.";
+
+    $manifestExists = Storage::disk('b2')->exists($episode->video_path);
+    $keyPath = storage_path("app/video_keys/{$episode->slug}.key");
+    $keyExists = file_exists($keyPath);
+
+    return response()->json([
+        '1_episode_slug' => $episode->slug,
+        '2_b2_manifest_path' => $episode->video_path,
+        '3_does_manifest_exist_on_b2' => $manifestExists ? 'YES' : 'NO - MISSING',
+        '4_expected_key_location_on_server' => $keyPath,
+        '5_does_key_exist_on_server' => $keyExists ? 'YES' : 'NO - MISSING',
+    ]);
+});
 
 require __DIR__.'/settings.php';

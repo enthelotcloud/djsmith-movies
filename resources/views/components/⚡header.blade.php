@@ -35,7 +35,8 @@ new class extends Component
     public function updatedSearch()
     {
         if (strlen($this->search) > 1) {
-            $this->searchResults = DB::table('movies')
+            // Fetch Movies
+            $movies = DB::table('movies')
                 ->where('status', 'ready')
                 ->where(function($query) {
                     $query->where('title', 'like', '%' . $this->search . '%')
@@ -44,15 +45,44 @@ new class extends Component
                 ->orderBy('created_at', 'desc')
                 ->take(5)
                 ->get()
-                ->map(function ($movie) {
+                ->map(function ($item) {
+                    $item->search_type = 'movie';
+                    return $item;
+                });
+
+            // Fetch Series
+            $series = DB::table('series')
+                ->where('status', 'ready')
+                ->where(function($query) {
+                    $query->where('title', 'like', '%' . $this->search . '%')
+                          ->orWhere('description', 'like', '%' . $this->search . '%');
+                })
+                ->orderBy('created_at', 'desc')
+                ->take(5)
+                ->get()
+                ->map(function ($item) {
+                    $item->search_type = 'series';
+                    return $item;
+                });
+
+            // Merge, Sort, Limit to 5, and Format
+            $this->searchResults = $movies->concat($series)
+                ->sortByDesc('created_at')
+                ->take(5)
+                ->map(function ($item) {
+                    $isSeries = $item->search_type === 'series';
+
                     return [
-                        'title' => $movie->title,
-                        'slug' => $movie->slug,
-                        'excerpt' => Str::limit($movie->description, 50),
-                        'poster' => $this->getPosterUrl($movie->thumbnail ?? $movie->thumbnail_path ?? null),
-                        'is_premium' => $movie->is_premium // Fetched to check if we need to lock it
+                        'title' => $item->title,
+                        'slug' => $item->slug,
+                        'excerpt' => Str::limit($item->description ?? '', 50),
+                        // Series usually use 'poster', Movies use 'thumbnail' or 'thumbnail_path'
+                        'poster' => $this->getPosterUrl($isSeries ? ($item->poster ?? $item->thumbnail ?? null) : ($item->thumbnail ?? $item->thumbnail_path ?? null)),
+                        'is_premium' => $item->is_premium ?? false,
+                        'type' => $item->search_type // Passed to UI to generate correct route
                     ];
                 })
+                ->values()
                 ->toArray();
         } else {
             $this->searchResults = [];
@@ -228,7 +258,14 @@ new class extends Component
                                         @php
                                             // Determine if this result needs to be locked based on subscription
                                             $isLocked = $result['is_premium'] && (!$isLoggedIn || !$hasActiveSub);
-                                            $actionUrl = $isLocked ? ($isLoggedIn ? route('client.subscriptions') : route('login')) : route('client.player', ['slug' => $result['slug']]);
+
+                                            if ($isLocked) {
+                                                $actionUrl = $isLoggedIn ? route('client.subscriptions') : route('login');
+                                            } else {
+                                                $actionUrl = $result['type'] === 'series'
+                                                    ? route('client.series.show', ['slug' => $result['slug']])
+                                                    : route('client.player', ['slug' => $result['slug']]);
+                                            }
                                         @endphp
 
                                         <a href="{{ $actionUrl }}" wire:navigate class="flex items-center gap-4 p-2 hover:bg-white/5 rounded-xl transition group">
