@@ -17,6 +17,12 @@ new #[Layout('layouts.app')] class extends Component {
     // --- FILTERS ---
     public $search = '';
     public $roleFilter = '';
+    public $filterSubStatus = '';
+
+    // --- BULK ACTIONS ---
+    public $selectedUsers = [];
+    public $selectAll = false;
+    public $isBulkDelete = false;
 
     // --- MODAL STATES ---
     public $isEditModalOpen = false;
@@ -38,8 +44,22 @@ new #[Layout('layouts.app')] class extends Component {
     public $newPassword = '';
     public $viewingUser = null;
 
-    public function updatingSearch() { $this->resetPage(); }
-    public function updatingRoleFilter() { $this->resetPage(); }
+    // Reset pagination when filters are updated
+    public function updated($propertyName)
+    {
+        if (in_array($propertyName, ['search', 'roleFilter', 'filterSubStatus'])) {
+            $this->resetPage();
+        }
+    }
+
+    public function updatedSelectAll($value)
+    {
+        if ($value) {
+            $this->selectedUsers = $this->users->pluck('id')->map(fn($id) => (string)$id)->toArray();
+        } else {
+            $this->selectedUsers = [];
+        }
+    }
 
     #[Computed]
     public function users()
@@ -55,6 +75,13 @@ new #[Layout('layouts.app')] class extends Component {
                 });
             })
             ->when($this->roleFilter, fn($q) => $q->where('role', $this->roleFilter))
+            ->when($this->filterSubStatus, function($q) {
+                if ($this->filterSubStatus === 'none') {
+                    $q->doesntHave('currentSubscription');
+                } else {
+                    $q->whereHas('currentSubscription', fn($sub) => $sub->where('status', $this->filterSubStatus));
+                }
+            })
             ->orderBy('created_at', 'desc')
             ->paginate(10);
     }
@@ -158,24 +185,46 @@ new #[Layout('layouts.app')] class extends Component {
         }
     }
 
-    public function openDeleteModal($id)
+    public function openDeleteModal($id = null)
     {
-        if ($id === Auth::id()) {
-            session()->flash('error', 'Error: You cannot delete your own account.');
-            return;
+        $this->isBulkDelete = is_null($id);
+
+        if ($this->isBulkDelete) {
+            if (empty($this->selectedUsers)) {
+                session()->flash('error', 'No users selected.');
+                return;
+            }
+
+            // Protect auth user in bulk action
+            if (in_array((string)Auth::id(), $this->selectedUsers)) {
+                $this->selectedUsers = array_diff($this->selectedUsers, [(string)Auth::id()]);
+                session()->flash('error', 'Your own account was excluded from the deletion list.');
+                if (empty($this->selectedUsers)) return;
+            }
+        } else {
+            if ($id === Auth::id()) {
+                session()->flash('error', 'Error: You cannot delete your own account.');
+                return;
+            }
+            $this->viewingUser = User::findOrFail($id);
+            $this->userId = $id;
         }
 
-        $this->viewingUser = User::findOrFail($id);
-        $this->userId = $id;
         $this->isDeleteModalOpen = true;
     }
 
     public function deleteUser()
     {
-        if ($this->userId && $this->userId !== Auth::id()) {
-            User::findOrFail($this->userId)->delete();
-            session()->flash('message', 'User data permanently deleted.');
+        $idsToDelete = $this->isBulkDelete ? $this->selectedUsers : [$this->userId];
+
+        if (!empty($idsToDelete)) {
+            User::whereIn('id', $idsToDelete)->delete();
+            session()->flash('message', $this->isBulkDelete ? 'Selected users permanently deleted.' : 'User data permanently deleted.');
         }
+
+        // Reset States
+        $this->selectedUsers = [];
+        $this->selectAll = false;
         $this->closeModals();
     }
 
@@ -202,7 +251,7 @@ new #[Layout('layouts.app')] class extends Component {
 
     public function resetForm()
     {
-        $this->reset(['userId', 'name', 'email', 'phone', 'role', 'wallet_balance', 'referral_code', 'referred_by']);
+        $this->reset(['userId', 'name', 'email', 'phone', 'role', 'wallet_balance', 'referral_code', 'referred_by', 'selectedUsers', 'selectAll']);
         $this->resetValidation();
     }
 
@@ -211,6 +260,7 @@ new #[Layout('layouts.app')] class extends Component {
         $this->isEditModalOpen = false;
         $this->isPasswordModalOpen = false;
         $this->isDeleteModalOpen = false;
+        $this->viewingUser = null;
         $this->resetForm();
     }
 };
@@ -226,33 +276,16 @@ new #[Layout('layouts.app')] class extends Component {
         </div>
     </div>
 
-    {{-- Header & Action Bar --}}
-    <div class="mb-6 bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-sm flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6">
+    {{-- Header --}}
+    <div class="mb-6 bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-sm flex justify-between items-center">
         <div>
             <h1 class="text-2xl font-bold text-white tracking-tight">User Management</h1>
             <p class="text-sm text-slate-400 mt-1">Manage accounts, wallets, roles, and subscriptions.</p>
         </div>
-
-        <div class="flex flex-wrap items-center gap-3 w-full lg:w-auto">
-            <div class="relative flex-1 lg:w-64">
-                <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                    <svg class="h-4 w-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
-                </div>
-                <input wire:model.live.debounce.300ms="search" type="text" placeholder="Search name, phone, ref..." class="w-full pl-10 pr-4 py-2 bg-slate-950 border border-slate-700 rounded-xl text-sm text-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 transition-colors">
-            </div>
-
-            <select wire:model.live="roleFilter" class="bg-slate-950 border border-slate-700 rounded-xl text-sm text-slate-300 py-2 pl-4 pr-8 focus:ring-1 focus:ring-blue-500 appearance-none">
-                <option value="">All Roles</option>
-                <option value="admin">Admins</option>
-                <option value="staff">Staff</option>
-                <option value="client">Clients</option>
-            </select>
-
-            <button wire:click="openCreateModal" class="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-xl transition shadow-sm flex items-center gap-2">
-                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
-                Add User
-            </button>
-        </div>
+        <button wire:click="openCreateModal" class="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-xl transition shadow-sm flex items-center gap-2 active:scale-95">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+            Add User
+        </button>
     </div>
 
     {{-- System Messages --}}
@@ -264,11 +297,47 @@ new #[Layout('layouts.app')] class extends Component {
     @endif
 
     @if(session()->has('error'))
-        <div x-data="{ show: true }" x-show="show" x-init="setTimeout(() => show = false, 5000)" class="mb-6 bg-red-900/30 border border-red-500/30 text-red-400 px-4 py-3 rounded-xl flex items-center gap-3">
+        <div x-data="{ show: true }" x-show="show" x-init="setTimeout(() => show = false, 5000)" class="mb-6 bg-red-900/30 border border-red-500/30 text-red-400 px-4 py-3 rounded-xl flex items-center gap-3 animate-pulse">
             <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
             <span class="text-sm font-medium">{{ session('error') }}</span>
         </div>
     @endif
+
+    {{-- Advanced Filter & Bulk Action Bar --}}
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-sm p-4 mb-6 flex flex-col md:flex-row gap-4 items-center justify-between">
+        <div class="flex-1 w-full flex flex-col md:flex-row gap-3">
+            <div class="relative flex-1 md:max-w-xs">
+                <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                    <svg class="h-4 w-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                </div>
+                <input wire:model.live.debounce.300ms="search" type="text" placeholder="Search name, phone, ref..." class="w-full pl-10 pr-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-sm text-white focus:ring-1 focus:ring-blue-500 focus:outline-none transition-colors">
+            </div>
+
+            <select wire:model.live="roleFilter" class="w-full md:w-40 bg-slate-950 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-300 focus:ring-1 focus:ring-blue-500 focus:outline-none appearance-none">
+                <option value="">All Roles</option>
+                <option value="admin">Admins</option>
+                <option value="staff">Staff</option>
+                <option value="client">Clients</option>
+            </select>
+
+            <select wire:model.live="filterSubStatus" class="w-full md:w-48 bg-slate-950 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-300 focus:ring-1 focus:ring-blue-500 focus:outline-none appearance-none">
+                <option value="">All Subscriptions</option>
+                <option value="active">Active Subs</option>
+                <option value="inactive">Inactive Subs</option>
+                <option value="not paid">Not Paid Subs</option>
+                <option value="suspended">Suspended Subs</option>
+                <option value="none">No Plan Assigned</option>
+            </select>
+        </div>
+
+        @if(count($selectedUsers) > 0)
+            <div class="flex-shrink-0 animate-in fade-in zoom-in duration-200">
+                <button wire:click="openDeleteModal()" class="px-5 py-2.5 bg-red-600/10 border border-red-600/50 text-red-500 rounded-xl hover:bg-red-600 hover:text-white transition font-bold text-sm shadow-sm">
+                    Delete Selected ({{ count($selectedUsers) }})
+                </button>
+            </div>
+        @endif
+    </div>
 
     {{-- Data Table --}}
     <div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-sm overflow-hidden">
@@ -276,6 +345,9 @@ new #[Layout('layouts.app')] class extends Component {
             <table class="w-full text-left text-sm text-slate-400 whitespace-nowrap">
                 <thead class="bg-slate-950 border-b border-slate-800 uppercase text-[11px] font-semibold text-slate-500">
                     <tr>
+                        <th class="px-6 py-4 w-12 text-center">
+                            <input type="checkbox" wire:model.live="selectAll" class="rounded bg-slate-900 border-slate-700 text-blue-600 focus:ring-blue-500 focus:ring-offset-slate-950">
+                        </th>
                         <th class="px-6 py-4">User Details</th>
                         <th class="px-6 py-4">Role & Ref</th>
                         <th class="px-6 py-4">Wallet</th>
@@ -285,7 +357,10 @@ new #[Layout('layouts.app')] class extends Component {
                 </thead>
                 <tbody class="divide-y divide-slate-800/50">
                     @forelse($this->users as $user)
-                        <tr wire:key="user-{{ $user->id }}" class="hover:bg-slate-800/20 transition-colors">
+                        <tr wire:key="user-{{ $user->id }}" class="hover:bg-slate-800/20 transition-colors {{ in_array((string)$user->id, $selectedUsers) ? 'bg-blue-900/10' : '' }}">
+                            <td class="px-6 py-4 text-center">
+                                <input type="checkbox" wire:model.live="selectedUsers" value="{{ $user->id }}" class="rounded bg-slate-900 border-slate-700 text-blue-600 focus:ring-blue-500 focus:ring-offset-slate-950 transition">
+                            </td>
                             <td class="px-6 py-4">
                                 <div class="flex items-center gap-3">
                                     <div class="h-10 w-10 rounded-lg bg-blue-900 text-blue-400 flex items-center justify-center font-bold">
@@ -317,9 +392,9 @@ new #[Layout('layouts.app')] class extends Component {
                             </td>
                             <td class="px-6 py-4">
                                 @php
-                                    $subStatus = $user->currentSubscription->status ?? 'inactive';
+                                    $subStatus = $user->currentSubscription->status ?? 'none';
                                 @endphp
-                                
+
                                 @if($subStatus === 'active')
                                     <span class="flex items-center gap-2 text-emerald-500 text-xs font-medium">
                                         <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span> Active
@@ -332,9 +407,13 @@ new #[Layout('layouts.app')] class extends Component {
                                     <span class="flex items-center gap-2 text-amber-500 text-xs font-medium">
                                         <span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span> Not Paid
                                     </span>
-                                @else
+                                @elseif($subStatus === 'inactive')
                                     <span class="flex items-center gap-2 text-slate-500 text-xs font-medium">
                                         <span class="h-1.5 w-1.5 rounded-full bg-slate-500"></span> Inactive
+                                    </span>
+                                @else
+                                    <span class="flex items-center gap-2 text-slate-600 text-xs font-medium italic">
+                                        No Plan Assigned
                                     </span>
                                 @endif
                             </td>
@@ -358,8 +437,8 @@ new #[Layout('layouts.app')] class extends Component {
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="5" class="px-6 py-12 text-center text-slate-500">
-                                No users found matching your criteria.
+                            <td colspan="6" class="px-6 py-16 text-center text-slate-500">
+                                No users found matching your search or filter criteria.
                             </td>
                         </tr>
                     @endforelse
@@ -597,8 +676,15 @@ new #[Layout('layouts.app')] class extends Component {
                     <div class="w-16 h-16 bg-red-900/30 text-red-500 rounded-full flex items-center justify-center mx-auto mb-5 border border-red-500/20">
                         <svg class="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
                     </div>
-                    <h3 class="text-xl font-bold text-white mb-2">Delete User?</h3>
-                    <p class="text-sm text-slate-400 mb-8">This action is permanent and will remove <strong class="text-slate-200">{{ $viewingUser->name }}</strong> from the database.</p>
+                    <h3 class="text-xl font-bold text-white mb-2">Confirm Deletion</h3>
+
+                    <p class="text-sm text-slate-400 mb-8">
+                        @if($isBulkDelete)
+                            This action is permanent and will remove <strong class="text-slate-200">{{ count($selectedUsers) }} selected users</strong> from the database.
+                        @else
+                            This action is permanent and will remove <strong class="text-slate-200">{{ $viewingUser->name ?? 'this user' }}</strong> from the database.
+                        @endif
+                    </p>
 
                     <div class="flex justify-between gap-3">
                         <button type="button" wire:click="closeModals" class="w-1/2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium transition">Cancel</button>

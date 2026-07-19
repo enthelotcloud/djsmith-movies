@@ -2,6 +2,7 @@
 
 use Livewire\Component;
 use Livewire\WithFileUploads;
+use Livewire\WithPagination;
 use Livewire\Attributes\Computed;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
@@ -10,7 +11,7 @@ use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Log;
 
 new class extends Component {
-    use WithFileUploads;
+    use WithFileUploads, WithPagination;
 
     public $currentView = 'list';
     public $editingId = null;
@@ -20,6 +21,19 @@ new class extends Component {
     public $searchResults = [];
     public $isSearching = false;
     public $tmdbError = '';
+
+    // Catalog List Filters & State
+    public $catalogSearch = '';
+    public $filterStatus = '';
+    public $filterPremium = '';
+    public $filterSeason = '';
+
+    // Bulk Delete State
+    public $selectedEpisodes = [];
+    public $selectAll = false;
+    public $showDeleteModal = false;
+    public $deleteId = null;
+    public $isBulkDelete = false;
 
     // Form State
     public $title;
@@ -44,10 +58,53 @@ new class extends Component {
     // Error tracking
     public $formErrors = [];
 
+    // Reset pagination when filters are updated
+    public function updated($propertyName)
+    {
+        if (in_array($propertyName, ['catalogSearch', 'filterStatus', 'filterPremium', 'filterSeason'])) {
+            $this->resetPage();
+        }
+    }
+
+    public function updatedSelectAll($value)
+    {
+        if ($value) {
+            $this->selectedEpisodes = $this->episodes->pluck('id')->map(fn($id) => (string)$id)->toArray();
+        } else {
+            $this->selectedEpisodes = [];
+        }
+    }
+
     #[Computed]
     public function episodes()
     {
-        return DB::table('episodes')->orderBy('created_at', 'desc')->get();
+        $query = DB::table('episodes')->orderBy('created_at', 'desc');
+
+        if (!empty($this->catalogSearch)) {
+            $query->where(function($q) {
+                $q->where('title', 'like', '%' . $this->catalogSearch . '%')
+                  ->orWhere('description', 'like', '%' . $this->catalogSearch . '%');
+            });
+        }
+
+        if ($this->filterStatus !== '') {
+            $query->where('status', $this->filterStatus);
+        }
+
+        if ($this->filterPremium !== '') {
+            $query->where('is_premium', $this->filterPremium);
+        }
+
+        if ($this->filterSeason !== '') {
+            $query->whereExists(function ($q) {
+                $q->select(DB::raw(1))
+                  ->from('episode_season')
+                  ->whereColumn('episode_season.episode_id', 'episodes.id')
+                  ->where('episode_season.season_id', $this->filterSeason);
+            });
+        }
+
+        return $query->paginate(15);
     }
 
     #[Computed]
@@ -90,7 +147,7 @@ new class extends Component {
         $this->reset([
             'editingId', 'title', 'slug', 'description', 'excerpt', 'selectedSeasons', 'poster_path', 'poster_upload',
             'manual_video_path', 'video', 'searchQuery', 'searchResults', 'tmdbError', 'formErrors',
-            'enc_key_base64'
+            'enc_key_base64', 'selectedEpisodes', 'selectAll'
         ]);
         $this->status = 'ready';
         $this->is_premium = true;
@@ -393,16 +450,40 @@ new class extends Component {
         }
     }
 
-    public function delete($id)
+    public function confirmDelete($id = null)
+    {
+        $this->isBulkDelete = is_null($id);
+
+        if ($this->isBulkDelete && empty($this->selectedEpisodes)) {
+            $this->dispatch('notify-toast', type: 'error', message: 'No episodes selected.');
+            return;
+        }
+
+        $this->deleteId = $id;
+        $this->showDeleteModal = true;
+    }
+
+    public function executeDelete()
     {
         try {
             DB::beginTransaction();
-            DB::table('episode_season')->where('episode_id', $id)->delete();
-            DB::table('episodes')->where('id', $id)->delete();
+
+            $idsToDelete = $this->isBulkDelete ? $this->selectedEpisodes : [$this->deleteId];
+
+            if (!empty($idsToDelete)) {
+                DB::table('episode_season')->whereIn('episode_id', $idsToDelete)->delete();
+                DB::table('episodes')->whereIn('id', $idsToDelete)->delete();
+            }
+
             DB::commit();
 
-            unset($this->episodes);
-            $this->dispatch('notify-toast', type: 'success', message: 'Episode deleted from database.');
+            // Reset States
+            $this->selectedEpisodes = [];
+            $this->selectAll = false;
+            $this->showDeleteModal = false;
+            $this->deleteId = null;
+
+            $this->dispatch('notify-toast', type: 'success', message: $this->isBulkDelete ? 'Selected episodes deleted.' : 'Episode deleted from database.');
         } catch (\Exception $e) {
             DB::rollBack();
             $this->dispatch('notify-toast', type: 'error', message: 'Failed to delete: ' . $e->getMessage());
@@ -426,11 +507,48 @@ new class extends Component {
     </div>
 
     @if($currentView === 'list')
-        <div class="bg-[#111111] border border-slate-800 rounded-2xl shadow-lg overflow-hidden">
+        <!-- Filters & Bulk Actions -->
+        <div class="bg-[#111111] border border-slate-800 rounded-2xl shadow-lg p-4 mb-6 flex flex-col md:flex-row gap-4 items-center justify-between">
+            <div class="flex-1 w-full flex flex-col md:flex-row gap-3">
+                <input type="text" wire:model.live.debounce.300ms="catalogSearch" placeholder="Search episodes..." class="w-full md:w-64 bg-black border border-slate-700 rounded-xl px-4 py-2.5 text-white text-sm focus:ring-1 focus:ring-red-600 focus:outline-none transition">
+
+                <select wire:model.live="filterStatus" class="w-full md:w-40 bg-black border border-slate-700 rounded-xl px-4 py-2.5 text-white text-sm focus:ring-1 focus:ring-red-600 focus:outline-none transition">
+                    <option value="">All Statuses</option>
+                    <option value="ready">Live / Ready</option>
+                    <option value="hidden">Hidden / Draft</option>
+                </select>
+
+                <select wire:model.live="filterPremium" class="w-full md:w-40 bg-black border border-slate-700 rounded-xl px-4 py-2.5 text-white text-sm focus:ring-1 focus:ring-red-600 focus:outline-none transition">
+                    <option value="">All Types</option>
+                    <option value="1">Premium</option>
+                    <option value="0">Free</option>
+                </select>
+
+                <select wire:model.live="filterSeason" class="w-full md:w-56 bg-black border border-slate-700 rounded-xl px-4 py-2.5 text-white text-sm focus:ring-1 focus:ring-red-600 focus:outline-none transition">
+                    <option value="">All Seasons</option>
+                    @foreach($this->seasons as $season)
+                        <option value="{{ $season->id }}">{{ $season->series_title }} - {{ $season->season_name }}</option>
+                    @endforeach
+                </select>
+            </div>
+
+            @if(count($selectedEpisodes) > 0)
+                <div class="flex-shrink-0 animate-in fade-in zoom-in duration-200">
+                    <button wire:click="confirmDelete()" class="px-5 py-2.5 bg-red-600/10 border border-red-600/50 text-red-500 rounded-xl hover:bg-red-600 hover:text-white transition font-bold text-sm shadow-sm">
+                        Delete Selected ({{ count($selectedEpisodes) }})
+                    </button>
+                </div>
+            @endif
+        </div>
+
+        <div class="bg-[#111111] border border-slate-800 rounded-2xl shadow-lg overflow-hidden flex flex-col">
             <div class="overflow-x-auto">
                 <table class="w-full text-left text-sm text-slate-400 whitespace-nowrap">
                     <thead class="bg-zinc-900 border-b border-slate-800 uppercase text-[11px] font-semibold text-slate-500">
                         <tr>
+                            <th class="px-6 py-4 w-12 text-center">
+                                <input type="checkbox" wire:model.live="selectAll" class="rounded bg-black border-slate-700 text-red-600 focus:ring-red-600 focus:ring-offset-black">
+                            </th>
                             <th class="px-6 py-4">Title & Poster</th>
                             <th class="px-6 py-4">Assigned Seasons</th>
                             <th class="px-6 py-4">Status</th>
@@ -439,7 +557,10 @@ new class extends Component {
                     </thead>
                     <tbody class="divide-y divide-slate-800/50">
                         @forelse($this->episodes as $episode)
-                            <tr class="hover:bg-zinc-900/50 transition-colors">
+                            <tr class="hover:bg-zinc-900/50 transition-colors {{ in_array($episode->id, $selectedEpisodes) ? 'bg-red-900/10' : '' }}">
+                                <td class="px-6 py-4 text-center">
+                                    <input type="checkbox" wire:model.live="selectedEpisodes" value="{{ $episode->id }}" class="rounded bg-black border-slate-700 text-red-600 focus:ring-red-600 focus:ring-offset-black transition">
+                                </td>
                                 <td class="px-6 py-4 flex items-center gap-4">
                                     @if($episode->thumbnail)
                                         <img src="{{ str_starts_with($episode->thumbnail, 'http') ? $episode->thumbnail : Storage::disk('public')->url($episode->thumbnail) }}" class="w-10 h-14 object-cover rounded shadow border border-slate-700" alt="{{ $episode->title }}">
@@ -474,15 +595,22 @@ new class extends Component {
                                 </td>
                                 <td class="px-6 py-4 text-right space-x-3">
                                     <button wire:click="edit({{ $episode->id }})" class="text-indigo-400 hover:text-indigo-300 font-bold transition">Edit</button>
-                                    <button wire:click="delete({{ $episode->id }})" wire:confirm="Delete this episode?" class="text-red-500 hover:text-red-400 font-bold transition">Delete</button>
+                                    <button wire:click="confirmDelete({{ $episode->id }})" class="text-red-500 hover:text-red-400 font-bold transition">Delete</button>
                                 </td>
                             </tr>
                         @empty
-                            <tr><td colspan="4" class="px-6 py-12 text-center text-slate-500 italic">No episodes found. Start by adding one.</td></tr>
+                            <tr><td colspan="5" class="px-6 py-16 text-center text-slate-500 italic">No episodes found matching your criteria.</td></tr>
                         @endforelse
                     </tbody>
                 </table>
             </div>
+
+            <!-- Pagination Links -->
+            @if($this->episodes->hasPages())
+                <div class="p-4 border-t border-slate-800 bg-zinc-900/30">
+                    {{ $this->episodes->links() }}
+                </div>
+            @endif
         </div>
     @else
         @if(!$editingId)
@@ -490,7 +618,7 @@ new class extends Component {
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-lg font-bold text-white">1. Auto-Fill via TMDB (Optional)</h3>
                 </div>
-                <input type="text" wire:model.live.debounce.500ms="searchQuery" placeholder="Search TMDB for the TV Show..." class="w-full bg-[#111111] border border-slate-700 rounded-xl px-4 py-4 text-white focus:ring-1 focus:ring-red-600">
+                <input type="text" wire:model.live.debounce.500ms="searchQuery" placeholder="Search TMDB for the TV Show..." class="w-full bg-[#111111] border border-slate-700 rounded-xl px-4 py-4 text-white focus:ring-1 focus:ring-red-600 focus:outline-none transition">
 
                 @if($tmdbError)
                     <div class="mt-4 p-3 bg-red-950/30 border border-red-800 rounded-lg text-red-400 text-sm">{{ $tmdbError }}</div>
@@ -566,13 +694,13 @@ new class extends Component {
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div>
                                 <label class="block text-[10px] font-bold text-slate-500 uppercase mb-2">Episode Title (e.g. Merlin - E1)</label>
-                                <input type="text" wire:model.live.debounce.300ms="title" placeholder="Episode Title" class="w-full bg-black border {{ isset($formErrors['title']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-white text-lg font-bold">
+                                <input type="text" wire:model.live.debounce.300ms="title" placeholder="Episode Title" class="w-full bg-black border {{ isset($formErrors['title']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-white text-lg font-bold focus:outline-none focus:ring-1 focus:ring-red-600 transition">
                                 @if(isset($formErrors['title'])) <p class="text-red-500 text-xs mt-1 font-bold">{{ $formErrors['title'][0] }}</p> @endif
                             </div>
 
                             <div>
                                 <label class="block text-[10px] font-bold text-slate-500 uppercase mb-2">Auto-Generated Slug</label>
-                                <input type="text" wire:model="slug" class="w-full bg-[#111111] border {{ isset($formErrors['slug']) ? 'border-red-500' : 'border-slate-800' }} rounded-xl px-4 py-3 text-slate-400 font-mono text-sm" {{ $editingId ? 'readonly' : '' }}>
+                                <input type="text" wire:model="slug" class="w-full bg-[#111111] border {{ isset($formErrors['slug']) ? 'border-red-500' : 'border-slate-800' }} rounded-xl px-4 py-3 text-slate-400 font-mono text-sm focus:outline-none" {{ $editingId ? 'readonly' : '' }}>
                                 @if(isset($formErrors['slug'])) <p class="text-red-500 text-xs mt-1 font-bold">{{ $formErrors['slug'][0] }}</p> @endif
                             </div>
                         </div>
@@ -581,23 +709,23 @@ new class extends Component {
                             <label class="block text-[10px] font-bold text-slate-500 uppercase mb-2 flex justify-between">
                                 Short Excerpt <span class="text-slate-600 font-normal normal-case">Max 160 characters</span>
                             </label>
-                            <textarea wire:model="excerpt" rows="2" maxlength="160" placeholder="Brief summary for UI cards..." class="w-full bg-black border {{ isset($formErrors['excerpt']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-slate-300 text-sm"></textarea>
+                            <textarea wire:model="excerpt" rows="2" maxlength="160" placeholder="Brief summary for UI cards..." class="w-full bg-black border {{ isset($formErrors['excerpt']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-slate-300 text-sm focus:outline-none focus:ring-1 focus:ring-red-600 transition"></textarea>
                             @if(isset($formErrors['excerpt'])) <p class="text-red-500 text-xs mt-1 font-bold">{{ $formErrors['excerpt'][0] }}</p> @endif
                         </div>
 
                         <div>
                             <label class="block text-[10px] font-bold text-slate-500 uppercase mb-2">Full Description</label>
-                            <textarea wire:model.live.debounce.1000ms="description" rows="4" placeholder="Synopsis..." class="w-full bg-black border {{ isset($formErrors['description']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-slate-300 text-sm"></textarea>
+                            <textarea wire:model.live.debounce.1000ms="description" rows="4" placeholder="Synopsis..." class="w-full bg-black border {{ isset($formErrors['description']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-slate-300 text-sm focus:outline-none focus:ring-1 focus:ring-red-600 transition"></textarea>
                             @if(isset($formErrors['description'])) <p class="text-red-500 text-xs mt-1 font-bold">{{ $formErrors['description'][0] }}</p> @endif
                         </div>
 
                         <!-- SEASONS ASSIGNMENT (Replacing Categories) -->
-                        <div class="bg-black border {{ isset($formErrors['selectedSeasons']) ? 'border-red-500' : 'border-slate-800' }} rounded-xl p-4">
+                        <div class="bg-black border {{ isset($formErrors['selectedSeasons']) ? 'border-red-500' : 'border-slate-800' }} rounded-xl p-4 transition">
                             <label class="block text-xs font-bold text-slate-500 mb-3 uppercase tracking-widest">Assign to Season</label>
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
                                 @forelse($this->seasons as $season)
                                     <label class="flex items-center gap-2 cursor-pointer text-slate-400 hover:text-white p-2 rounded-lg bg-zinc-900 border border-slate-800 hover:border-slate-600 transition">
-                                        <input type="checkbox" wire:model="selectedSeasons" value="{{ $season->id }}" class="rounded bg-black text-red-600 border-slate-700">
+                                        <input type="checkbox" wire:model="selectedSeasons" value="{{ $season->id }}" class="rounded bg-black text-red-600 border-slate-700 focus:ring-red-600 focus:ring-offset-black">
                                         <span class="text-xs font-bold">{{ $season->series_title }} <span class="text-slate-500 font-normal">- {{ $season->season_name }}</span></span>
                                     </label>
                                 @empty
@@ -610,13 +738,13 @@ new class extends Component {
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-4 border-t border-slate-800 pt-5">
                             <div>
                                 <label class="block text-[10px] font-bold text-slate-500 uppercase mb-2">Duration (Minutes)</label>
-                                <input type="number" wire:model="duration_minutes" placeholder="45" class="w-full bg-black border {{ isset($formErrors['duration_minutes']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-white text-sm">
+                                <input type="number" wire:model="duration_minutes" placeholder="45" class="w-full bg-black border {{ isset($formErrors['duration_minutes']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:ring-1 focus:ring-red-600 transition">
                                 @if(isset($formErrors['duration_minutes'])) <p class="text-red-500 text-xs mt-1 font-bold">{{ $formErrors['duration_minutes'][0] }}</p> @endif
                             </div>
 
                             <div>
                                 <label class="block text-[10px] font-bold text-slate-500 uppercase mb-2">Publish Status</label>
-                                <select wire:model="status" class="w-full bg-black border {{ isset($formErrors['status']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-white text-sm">
+                                <select wire:model="status" class="w-full bg-black border {{ isset($formErrors['status']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:ring-1 focus:ring-red-600 transition">
                                     <option value="ready">Live / Ready</option>
                                     <option value="hidden">Hidden / Draft</option>
                                 </select>
@@ -625,7 +753,7 @@ new class extends Component {
 
                             <div class="flex items-center pt-8">
                                 <label class="flex items-center gap-3 cursor-pointer text-white">
-                                    <input type="checkbox" wire:model="is_premium" class="rounded bg-black text-red-600 border-slate-700">
+                                    <input type="checkbox" wire:model="is_premium" class="rounded bg-black text-red-600 border-slate-700 focus:ring-red-600 focus:ring-offset-black transition">
                                     <span class="text-xs font-bold uppercase tracking-widest text-amber-500">Premium Episode</span>
                                 </label>
                                 @if(isset($formErrors['is_premium'])) <p class="text-red-500 text-xs mt-1 font-bold">{{ $formErrors['is_premium'][0] }}</p> @endif
@@ -645,13 +773,13 @@ new class extends Component {
                             <div class="flex justify-between items-center mb-4">
                                 <label class="block text-[10px] font-bold text-slate-500 uppercase">Video Source</label>
                                 <div class="bg-[#111111] border border-slate-800 rounded-lg p-1 flex">
-                                    <button type="button" wire:click="$set('uploadMethod', 'link')" class="px-3 py-1 text-[9px] font-black rounded-md {{ $uploadMethod === 'link' ? 'bg-zinc-800 text-white' : 'text-slate-500' }}">LINK/PATH</button>
-                                    <button type="button" wire:click="$set('uploadMethod', 'file')" class="px-3 py-1 text-[9px] font-black rounded-md {{ $uploadMethod === 'file' ? 'bg-zinc-800 text-white' : 'text-slate-500' }}">UPLOAD B2</button>
+                                    <button type="button" wire:click="$set('uploadMethod', 'link')" class="px-3 py-1 text-[9px] font-black rounded-md {{ $uploadMethod === 'link' ? 'bg-zinc-800 text-white' : 'text-slate-500' }} transition">LINK/PATH</button>
+                                    <button type="button" wire:click="$set('uploadMethod', 'file')" class="px-3 py-1 text-[9px] font-black rounded-md {{ $uploadMethod === 'file' ? 'bg-zinc-800 text-white' : 'text-slate-500' }} transition">UPLOAD B2</button>
                                 </div>
                             </div>
 
                             @if($uploadMethod === 'link')
-                                <input type="text" wire:model="manual_video_path" placeholder="e.g. series/merlin-e1/master.m3u8" class="w-full bg-[#111111] border {{ isset($formErrors['manual_video_path']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 font-mono text-sm text-red-400">
+                                <input type="text" wire:model="manual_video_path" placeholder="e.g. series/merlin-e1/master.m3u8" class="w-full bg-[#111111] border {{ isset($formErrors['manual_video_path']) ? 'border-red-500' : 'border-slate-700' }} rounded-xl px-4 py-3 font-mono text-sm text-red-400 focus:outline-none focus:ring-1 focus:ring-red-600 transition">
                                 @if(isset($formErrors['manual_video_path'])) <p class="text-red-500 text-xs mt-2 font-bold">{{ $formErrors['manual_video_path'][0] }}</p> @endif
                             @else
                                 <div x-data="{ isUploading: false, progress: 0 }"
@@ -741,6 +869,31 @@ new class extends Component {
                     {{ $editingId ? 'COMMIT CHANGES' : 'PUBLISH EPISODE' }}
                 </button>
             </form>
+        </div>
+    @endif
+
+    {{-- DELETE CONFIRMATION MODAL --}}
+    @if($showDeleteModal)
+        <div class="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm px-4 animate-in fade-in duration-200">
+            <div class="bg-[#111111] border border-slate-800 rounded-2xl shadow-2xl p-6 max-w-sm w-full animate-in zoom-in-95 duration-200">
+                <div class="flex items-center gap-3 mb-4">
+                    <div class="w-10 h-10 rounded-full bg-red-600/20 flex items-center justify-center shrink-0">
+                        <svg class="w-5 h-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                        </svg>
+                    </div>
+                    <h3 class="text-xl font-black text-white">Confirm Deletion</h3>
+                </div>
+
+                <p class="text-slate-400 text-sm mb-6 pl-1">
+                    {{ $isBulkDelete ? "Are you sure you want to delete ".count($selectedEpisodes)." selected episodes? This action cannot be undone and will permanently remove them." : "Are you sure you want to delete this episode? This action cannot be undone and will permanently remove it." }}
+                </p>
+
+                <div class="flex gap-3 justify-end">
+                    <button wire:click="$set('showDeleteModal', false)" class="px-5 py-2.5 rounded-xl bg-zinc-900 border border-slate-700 text-white font-bold hover:bg-zinc-800 transition">Cancel</button>
+                    <button wire:click="executeDelete" class="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold shadow-lg shadow-red-600/20 transition">Yes, Delete</button>
+                </div>
+            </div>
         </div>
     @endif
 </div>
