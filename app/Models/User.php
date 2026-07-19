@@ -17,6 +17,7 @@ use Illuminate\Support\Str;
 use Laravel\Fortify\Contracts\PasskeyUser;
 use Laravel\Fortify\PasskeyAuthenticatable;
 use Laravel\Fortify\TwoFactorAuthenticatable;
+use NotificationChannels\WebPush\HasPushSubscriptions;
 
 /**
  * @property int $id
@@ -37,18 +38,19 @@ use Laravel\Fortify\TwoFactorAuthenticatable;
  * @property Carbon|null $updated_at
  */
 #[Fillable([
-    'name', 
-    'email', 
-    'password', 
-    'role', 
-    'phone', 
-    'referral_code', 
-    'referred_by', 
+    'name',
+    'email',
+    'password',
+    'role',
+    'phone',
+    'referral_code',
+    'referred_by',
     'wallet_balance'
 ])]
 #[Hidden(['password', 'two_factor_secret', 'two_factor_recovery_codes', 'remember_token'])]
 class User extends Authenticatable implements PasskeyUser
 {
+    use HasPushSubscriptions;
     /** @use HasFactory<UserFactory> */
     use HasFactory, Notifiable, PasskeyAuthenticatable, TwoFactorAuthenticatable;
 

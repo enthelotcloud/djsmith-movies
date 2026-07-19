@@ -3,6 +3,7 @@
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\{Route, DB, Storage, Log, Cache, Auth};
 use Illuminate\Support\Str;
+use App\Http\Controllers\PushController;
 
 Route::livewire('/', 'pages::home')->name('home');
 Route::livewire('/live', 'pages::live')->name('live');
@@ -17,6 +18,7 @@ Route::view('/terms-of-services', 'terms-of-services')->name('terms');
 
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::view('dashboard', 'dashboard')->name('dashboard');
+    Route::post('/push-subscribe', [PushController::class, 'subscribe']);
 });
 
 // // 1. Manifest Proxy
