@@ -14,7 +14,7 @@ class extends Component
     public $episode;
     public $season;
     public $series;
-    public $nextEpisodeSlug = null;
+    public $nextEpisodeUrl = null; // Changed from Slug to exact URL
 
     public $streamUrl;
     public $thumbnailUrl = null;
@@ -54,7 +54,8 @@ class extends Component
                 ->first();
 
             if ($nextEpisode) {
-                $this->nextEpisodeSlug = $nextEpisode->slug;
+                // Dynamically generate the exact URL based on whatever route name you are currently on
+                $this->nextEpisodeUrl = route(request()->route()->getName(), ['slug' => $nextEpisode->slug]);
             }
         }
 
@@ -162,7 +163,7 @@ class extends Component
         lastSavedTime: 0,
 
         // Auto-Next Variables
-        nextEpisodeSlug: @js($nextEpisodeSlug),
+        nextEpisodeUrl: @js($nextEpisodeUrl),
         showNextPrompt: false,
         countdown: 15,
 
@@ -196,7 +197,7 @@ class extends Component
                 }
 
                 // 🚨 AUTO-NEXT LOGIC (Trigger at 15 seconds remaining)
-                if (this.nextEpisodeSlug && duration > 0) {
+                if (this.nextEpisodeUrl && duration > 0) {
                     let timeLeft = duration - currentTime;
 
                     if (timeLeft <= 15 && timeLeft > 0) {
@@ -293,9 +294,8 @@ class extends Component
         },
 
         goToNextEpisode() {
-            if(this.nextEpisodeSlug) {
-                // Ensure it points to the client prefix correctly
-                window.location.href = `/client/series/watch/${this.nextEpisodeSlug}`;
+            if(this.nextEpisodeUrl) {
+                window.location.href = this.nextEpisodeUrl;
             }
         },
 
@@ -501,7 +501,7 @@ class extends Component
             </a>
 
             {{-- Manual Next Button --}}
-            @if($nextEpisodeSlug)
+            @if($nextEpisodeUrl)
                 <button @click="goToNextEpisode()" class="pointer-events-auto inline-flex items-center gap-2 bg-red-600/90 px-4 py-2 rounded-full border border-red-500/50 text-sm font-bold backdrop-blur-md hover:bg-red-500 transition shadow-[0_0_15px_rgba(220,38,38,0.4)]">
                     Next Episode
                     <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
@@ -511,7 +511,7 @@ class extends Component
 
         {{-- Session Info Watermark --}}
         <div class="absolute bottom-6 right-6 sm:bottom-10 sm:right-10 opacity-20 select-none text-[10px] sm:text-xs tracking-widest font-bold pointer-events-none">
-            STREAMING ON DJSMITH.CO.KE • {{ Auth::user()->name }}
+            STREAMING ON DJSMITH.CO.KE • {{ Auth::user()->name ?? 'GUEST' }}
         </div>
     </div>
 
