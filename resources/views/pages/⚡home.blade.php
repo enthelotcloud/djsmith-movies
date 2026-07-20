@@ -119,7 +119,6 @@ class extends Component
         return $this->movies->take(8);
     }
 
-    // NEW: Fetch latest active series
     #[Computed]
     public function latestSeries()
     {
@@ -160,10 +159,14 @@ class extends Component
         }
     }
 
+    // 🔒 SECURE MOVIE ACCESS
     public function canWatch($movie)
     {
         if (!$this->isLoggedIn) return false;
-        if ($movie->is_premium && !$this->hasActiveSub) return false;
+
+        $isPremium = isset($movie->is_premium) ? (bool)$movie->is_premium : true;
+        if ($isPremium && !$this->hasActiveSub) return false;
+
         return true;
     }
 
@@ -173,22 +176,38 @@ class extends Component
             return route('login');
         }
 
-        if ($movie->is_premium && !$this->hasActiveSub) {
+        if (!$this->canWatch($movie)) {
             return route('client.subscriptions');
         }
 
         return route('client.player', ['slug' => $movie->slug]);
     }
 
-    // NEW: Get Series Action (Locks if not logged in)
+    // 🔒 SECURE SERIES ACCESS
+    public function canWatchSeries($series)
+    {
+        if (!$this->isLoggedIn) return false;
+
+        // Strictly evaluate premium status. If 'is_premium' doesn't exist on the schema yet,
+        // we default it to true to ensure NO series can be watched for free by mistake.
+        $isPremium = isset($series->is_premium) ? (bool)$series->is_premium : true;
+
+        if ($isPremium && !$this->hasActiveSub) return false;
+
+        return true;
+    }
+
     public function getSeriesAction($series)
     {
         if (!$this->isLoggedIn) {
             return route('login');
         }
 
-        // Assuming you will create a series overview page that lists the seasons/episodes
-        // Fallback to home if the route doesn't exist yet, but you should create a 'client.series.show' route
+        // 🚨 THIS WAS MISSING: Now strictly enforces paywall routing
+        if (!$this->canWatchSeries($series)) {
+            return route('client.subscriptions');
+        }
+
         return route('client.series.show', ['slug' => $series->slug]);
     }
 };
@@ -396,7 +415,7 @@ class extends Component
     {{-- 📂 MAIN CONTENT --}}
     <div id="browse" class="relative z-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 space-y-20">
 
-        {{-- ⏳ CONTINUE WATCHING (Only visible to logged-in users with records) --}}
+        {{-- ⏳ CONTINUE WATCHING --}}
         @if($this->isLoggedIn && $this->continueWatching->isNotEmpty())
             <section>
                 <div class="flex items-center justify-between mb-8">
@@ -409,6 +428,7 @@ class extends Component
                 <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
                     @foreach($this->continueWatching as $movie)
                         @php
+                            $canPlay = $this->canWatch($movie);
                             $actionUrl = $this->getMovieAction($movie);
                             $movieThumb = $movie->thumbnail ?? $movie->thumbnail_path ?? null;
                             $percent = $movie->duration_in_seconds ? min(100, max(0, ($movie->progress_seconds / $movie->duration_in_seconds) * 100)) : 0;
@@ -431,11 +451,20 @@ class extends Component
                                     </div>
                                 @endif
 
-                                {{-- Play Overlays --}}
-                                <div class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-all duration-300 flex items-center justify-center z-10">
-                                    <a href="{{ $actionUrl }}" wire:navigate class="w-12 h-12 bg-red-600/90 rounded-full flex items-center justify-center border border-red-500 shadow-xl transition-transform hover:scale-110">
-                                        <svg class="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 20 20"><path d="M4 4l12 6-12 6z"/></svg>
-                                    </a>
+                                {{-- Play Overlays (NOW SECURED) --}}
+                                <div class="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-all duration-300 flex items-center justify-center z-10">
+                                    @if($canPlay)
+                                        <a href="{{ $actionUrl }}" wire:navigate class="w-14 h-14 bg-red-600/90 rounded-full flex items-center justify-center border border-red-500 shadow-xl transition-transform hover:scale-110 backdrop-blur-sm">
+                                            <svg class="w-6 h-6 text-white ml-1" fill="currentColor" viewBox="0 0 20 20"><path d="M4 4l12 6-12 6z"/></svg>
+                                        </a>
+                                    @else
+                                        <a href="{{ $actionUrl }}" class="flex flex-col items-center gap-2 bg-black/80 backdrop-blur-md rounded-xl px-4 py-3 border border-amber-500/50 shadow-xl hover:border-amber-500 hover:scale-105 transition-all">
+                                            <svg class="w-6 h-6 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"/>
+                                            </svg>
+                                            <span class="text-[10px] font-bold text-amber-500 uppercase tracking-wider text-center leading-tight">Subscribe<br>to Resume</span>
+                                        </a>
+                                    @endif
                                 </div>
 
                                 {{-- Progress Indicator Bar --}}
@@ -516,7 +545,7 @@ class extends Component
                                 @endif
 
                                 {{-- Hover Overlay --}}
-                                <div class="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 z-10">
+                                <div class="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 z-10 bg-black/40">
                                     @if($canPlay)
                                         <a href="{{ $actionUrl }}"
                                            wire:navigate
@@ -525,7 +554,7 @@ class extends Component
                                         </a>
                                     @elseif(!$this->isLoggedIn)
                                         <a href="{{ $actionUrl }}"
-                                           class="flex flex-col items-center gap-2 bg-black/80 backdrop-blur rounded-xl px-6 py-4 border border-slate-700 hover:border-red-500 transition-all shadow-xl">
+                                           class="flex flex-col items-center gap-2 bg-black/80 backdrop-blur rounded-xl px-6 py-4 border border-slate-700 hover:border-red-500 transition-all shadow-xl hover:scale-105">
                                             <svg class="w-8 h-8 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
                                                 <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9"/>
                                             </svg>
@@ -533,7 +562,7 @@ class extends Component
                                         </a>
                                     @else
                                         <a href="{{ $actionUrl }}"
-                                           class="flex flex-col items-center gap-2 bg-black/80 backdrop-blur rounded-xl px-6 py-4 border border-amber-500/50 hover:border-amber-500 transition-all shadow-xl">
+                                           class="flex flex-col items-center gap-2 bg-black/80 backdrop-blur rounded-xl px-6 py-4 border border-amber-500/50 hover:border-amber-500 transition-all shadow-xl hover:scale-105">
                                             <svg class="w-8 h-8 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
                                                 <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"/>
                                             </svg>
@@ -636,6 +665,7 @@ class extends Component
                 <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
                     @foreach($this->latestSeries as $show)
                         @php
+                            $canPlay = $this->canWatchSeries($show);
                             $actionUrl = $this->getSeriesAction($show);
                             $showPoster = $show->poster ?? null;
                         @endphp
@@ -652,7 +682,7 @@ class extends Component
                                 @else
                                     <div class="w-full h-full bg-zinc-800 flex items-center justify-center">
                                         <svg class="w-12 h-12 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2-2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
                                         </svg>
                                     </div>
                                 @endif
@@ -660,14 +690,20 @@ class extends Component
                                 {{-- Gradient Overlay --}}
                                 <div class="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent"></div>
 
-                                {{-- TV Series Badge --}}
-                                <div class="absolute top-3 left-3 z-20">
+                                {{-- Badges --}}
+                                <div class="absolute top-3 left-3 z-20 flex flex-col gap-1.5">
                                     <span class="px-2 py-1 bg-indigo-600 text-white text-[9px] font-black uppercase tracking-widest rounded-md shadow-lg border border-indigo-500">TV Series</span>
                                 </div>
 
-                                {{-- Hover Overlay --}}
-                                <div class="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 z-10">
-                                    @if($this->isLoggedIn)
+                                @if(isset($show->is_premium) && $show->is_premium)
+                                    <div class="absolute top-3 right-3 z-20">
+                                        <span class="px-2 py-1 bg-amber-500 text-black text-[9px] font-black uppercase tracking-widest rounded-md shadow-lg border border-amber-400">Premium</span>
+                                    </div>
+                                @endif
+
+                                {{-- Hover Overlay (NOW SECURED) --}}
+                                <div class="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 z-10 bg-black/40">
+                                    @if($canPlay)
                                         <a href="{{ $actionUrl }}"
                                            wire:navigate
                                            class="flex flex-col items-center gap-2 bg-black/80 backdrop-blur rounded-xl px-6 py-4 border border-slate-700 hover:border-red-500 transition-all shadow-xl hover:scale-105">
@@ -676,13 +712,21 @@ class extends Component
                                             </svg>
                                             <span class="text-xs font-bold text-white uppercase tracking-wider">View Episodes</span>
                                         </a>
-                                    @else
+                                    @elseif(!$this->isLoggedIn)
                                         <a href="{{ $actionUrl }}"
-                                           class="flex flex-col items-center gap-2 bg-black/80 backdrop-blur rounded-xl px-6 py-4 border border-slate-700 hover:border-red-500 transition-all shadow-xl">
+                                           class="flex flex-col items-center gap-2 bg-black/80 backdrop-blur rounded-xl px-6 py-4 border border-slate-700 hover:border-red-500 transition-all shadow-xl hover:scale-105">
                                             <svg class="w-8 h-8 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
                                                 <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9"/>
                                             </svg>
                                             <span class="text-xs font-bold text-white uppercase tracking-wider">Sign In to Watch</span>
+                                        </a>
+                                    @else
+                                        <a href="{{ $actionUrl }}"
+                                           class="flex flex-col items-center gap-2 bg-black/80 backdrop-blur rounded-xl px-6 py-4 border border-amber-500/50 hover:border-amber-500 transition-all shadow-xl hover:scale-105">
+                                            <svg class="w-8 h-8 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"/>
+                                            </svg>
+                                            <span class="text-xs font-bold text-amber-500 uppercase tracking-wider text-center">Subscribe<br>to Watch</span>
                                         </a>
                                     @endif
                                 </div>
