@@ -18,6 +18,9 @@ class extends Component
     public $isLoggedIn = false;
     public $featuredMovies = [];
 
+    // Session Tracking
+    public $hasSessionConflict = false;
+
     public function mount()
     {
         $this->isLoggedIn = Auth::check();
@@ -61,7 +64,8 @@ class extends Component
 
         if ($user->active_session_id && $user->active_session_id !== $currentSession) {
             if ($user->last_active_at && Carbon::parse($user->last_active_at)->diffInMinutes(now()) < 5) {
-                abort(403, 'You have another active streaming session open. Please close it to continue here.');
+                $this->hasSessionConflict = true;
+                return;
             }
         }
 
@@ -69,6 +73,16 @@ class extends Component
             'active_session_id' => $currentSession,
             'last_active_at' => now(),
         ]);
+    }
+
+    public function forceTakeoverSession()
+    {
+        DB::table('users')->where('id', Auth::id())->update([
+            'active_session_id' => session()->getId(),
+            'last_active_at' => now(),
+        ]);
+
+        $this->hasSessionConflict = false;
     }
 
     #[Computed]
@@ -788,4 +802,33 @@ class extends Component
         </section>
 
     </div>
+
+    {{-- 🚨 ACTIVE SESSION CONFLICT MODAL --}}
+    @if($hasSessionConflict)
+        <div class="fixed inset-0 z-[100] bg-black/95 backdrop-blur-2xl flex items-center justify-center p-4">
+            <div class="bg-[#111111] border border-red-900/40 rounded-3xl p-6 sm:p-8 max-w-md w-full text-center shadow-2xl shadow-red-900/20 relative overflow-hidden">
+
+                <div class="w-16 h-16 bg-red-600/10 border border-red-500/30 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <svg class="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                </div>
+
+                <h2 class="text-2xl font-black text-white mb-2 tracking-tight">Session Conflict</h2>
+                <p class="text-slate-400 text-sm mb-6 leading-relaxed">
+                    Your account is currently active on another device or tab. Would you like to end the other session to continue here?
+                </p>
+
+                <div class="flex flex-col gap-3">
+                    <button wire:click="forceTakeoverSession" class="w-full py-3.5 bg-red-600 hover:bg-red-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-red-600/30 text-sm">
+                        End Other Session & Continue
+                    </button>
+
+                    <button onclick="window.location.reload()" class="w-full py-3.5 bg-zinc-800 hover:bg-zinc-700 text-slate-300 font-bold rounded-xl transition-all text-sm">
+                        Refresh Page
+                    </button>
+                </div>
+            </div>
+        </div>
+    @endif
 </div>
