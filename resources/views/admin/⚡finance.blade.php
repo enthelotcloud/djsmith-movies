@@ -123,7 +123,7 @@ class extends Component
 };
 ?>
 
-<div class="min-h-screen bg-[#0a0a0a] text-white p-6 space-y-8"
+<div class="min-h-screen  text-white space-y-8"
      x-data="{
         chartInstance: null,
         initChart() {
