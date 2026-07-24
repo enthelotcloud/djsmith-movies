@@ -7,14 +7,14 @@ use App\Http\Controllers\PushController;
 
 Route::livewire('/', 'pages::home')->name('home');
 Route::livewire('/live', 'pages::live')->name('live');
-Route::view('/about', 'about')->name('about');
-Route::view('/contact', 'contact')->name('contact');
-Route::view('/faqs', 'faqs')->name('faqs');
+// Route::livewire('/about', 'pages::about')->name('about');
+// Route::livewire('/contact', 'pages::contact')->name('contact');
+Route::livewire('/faqs', 'pages::faqs')->name('faqs');
 
 
 Route::livewire('/search', 'pages::search-result')->name('client.search');
-Route::view('/privacy-policy', 'privacy-policy')->name('privacy');
-Route::view('/terms-of-services', 'terms-of-services')->name('terms');
+Route::livewire('/privacy-policy', 'pages::privacy')->name('privacy');
+Route::livewire('/terms-of-services', 'pages::terms')->name('terms');
 
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::view('dashboard', 'dashboard')->name('dashboard');
