@@ -14,7 +14,7 @@ new class extends Component
     public $showMobileMenu = false;
     public $currentRoute = '';
 
-    // Auth & Subscriptions State for the search locks
+    // Auth & Subscriptions State for search locks
     public $isLoggedIn = false;
     public $hasActiveSub = false;
 
@@ -76,10 +76,8 @@ new class extends Component
                         'title' => $item->title,
                         'slug' => $item->slug,
                         'excerpt' => Str::limit($item->description ?? '', 50),
-                        // Series usually use 'poster', Movies use 'thumbnail' or 'thumbnail_path'
                         'poster' => $this->getPosterUrl($isSeries ? ($item->poster ?? $item->thumbnail ?? null) : ($item->thumbnail ?? $item->thumbnail_path ?? null)),
-                        'is_premium' => $item->is_premium ?? false,
-                        'type' => $item->search_type // Passed to UI to generate correct route
+                        'type' => $item->search_type
                     ];
                 })
                 ->values()
@@ -205,7 +203,7 @@ new class extends Component
                     </nav>
                 </div>
 
-                {{-- Center: Unified Search (Visible on all screens, flex-1 allows scaling) --}}
+                {{-- Center: Unified Search --}}
                 <div class="flex flex-1 max-w-md mx-1 sm:mx-4 lg:mx-8 relative z-50">
                     <form wire:submit.prevent="submitSearch" @submit="saveSearch($wire.search)" class="w-full relative group">
                         <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -256,8 +254,8 @@ new class extends Component
                                 <div class="p-2 space-y-1">
                                     @foreach($searchResults as $result)
                                         @php
-                                            // Determine if this result needs to be locked based on subscription
-                                            $isLocked = $result['is_premium'] && (!$isLoggedIn || !$hasActiveSub);
+                                            // 🔒 STRICT PAYWALL: EVERYTHING IS LOCKED UNLESS USER HAS ACTIVE SUB
+                                            $isLocked = !$isLoggedIn || !$hasActiveSub;
 
                                             if ($isLocked) {
                                                 $actionUrl = $isLoggedIn ? route('client.subscriptions') : route('login');
@@ -277,7 +275,7 @@ new class extends Component
                                                     <div class="w-full h-full bg-gray-800 rounded-lg flex items-center justify-center text-[8px] text-gray-600">No Img</div>
                                                 @endif
 
-                                                {{-- 🔒 The Lock Overlay --}}
+                                                {{-- 🔒 Lock Overlay for all non-subscribed users --}}
                                                 @if($isLocked)
                                                     <div class="absolute inset-0 bg-black/60 rounded-lg flex items-center justify-center backdrop-blur-[1px]">
                                                         <svg class="w-4 h-4 text-amber-500" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C9.243 2 7 4.243 7 7v3H6c-1.103 0-2 .897-2 2v8c0 1.103.897 2 2 2h12c1.103 0 2-.897 2-2v-8c0-1.103-.897-2-2-2h-1V7c0-2.757-2.243-5-5-5zm-3 5c0-1.654 1.346-3 3-3s3 1.346 3 3v3H9V7zm8 5v8H5v-8h14zM12 14c-1.104 0-2 .896-2 2s.896 2 2 2 2-.896 2-2-.896-2-2-2z"/></svg>
@@ -289,7 +287,7 @@ new class extends Component
                                                 <div class="flex items-center gap-2">
                                                     <h4 class="text-sm font-bold text-white truncate group-hover:text-red-400 transition">{{ $result['title'] }}</h4>
                                                     @if($isLocked)
-                                                        <span class="text-[8px] font-bold text-amber-500 uppercase tracking-widest border border-amber-500/30 px-1 rounded">Premium</span>
+                                                        <span class="text-[8px] font-bold text-amber-500 uppercase tracking-widest border border-amber-500/30 px-1 rounded">Locked</span>
                                                     @endif
                                                 </div>
                                                 <p class="text-[11px] text-gray-500 truncate mt-0.5">{{ $result['excerpt'] }}</p>
@@ -353,7 +351,7 @@ new class extends Component
                             </div>
                         </div>
 
-                        {{-- Mobile Menu Toggle (replaces user menu on mobile) --}}
+                        {{-- Mobile Menu Toggle --}}
                         <button @click="mobileMenu = !mobileMenu" class="lg:hidden p-2 text-gray-400 hover:text-white rounded-lg transition-colors">
                             <svg x-show="!mobileMenu" class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
                             <svg x-show="mobileMenu" style="display:none;" class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
@@ -396,20 +394,15 @@ new class extends Component
 
     {{-- ========================================== --}}
     {{-- MOBILE BOTTOM NAVIGATION - LIQUID GLASS --}}
-    {{-- Only visible on mobile (hidden on lg and up) --}}
     {{-- ========================================== --}}
     <div class="lg:hidden fixed bottom-0 left-0 right-0 z-50 pb-4 px-4"
          x-data="{
             activeTab: '{{ $currentRoute ? (str_contains($currentRoute, 'home') ? 'home' : (str_contains($currentRoute, 'search') ? 'search' : (str_contains($currentRoute, 'subscriptions') ? 'plans' : (str_contains($currentRoute, 'live') ? 'live' : 'home')))) : 'home' }}'
          }">
 
-        {{-- Glass morphism container --}}
         <div class="relative mx-auto max-w-lg">
-
-            {{-- Glow effect behind the nav --}}
             <div class="absolute inset-0 bg-gradient-to-t from-red-600/20 via-red-600/5 to-transparent blur-2xl -top-10 rounded-full pointer-events-none"></div>
 
-            {{-- Main nav container --}}
             <nav class="relative flex items-center justify-around h-16 px-2
                         bg-gray-900/70 backdrop-blur-3xl
                         border border-white/10
@@ -418,7 +411,6 @@ new class extends Component
                         before:absolute before:inset-0 before:rounded-2xl before:bg-gradient-to-b before:from-white/10 before:to-transparent before:pointer-events-none
                         after:absolute after:inset-0 after:rounded-2xl after:bg-gradient-to-t after:from-black/20 after:to-transparent after:pointer-events-none">
 
-                {{-- Liquid highlight effect on top --}}
                 <div class="absolute top-0 left-4 right-4 h-px bg-gradient-to-r from-transparent via-white/20 to-transparent pointer-events-none"></div>
 
                 {{-- Home --}}
@@ -451,7 +443,7 @@ new class extends Component
                     </span>
                 </a>
 
-                {{-- Center: Chat (Toasts Notification) --}}
+                {{-- Center: Chat --}}
                 <div class="relative -mt-8 mx-2">
                     <div class="absolute inset-0 bg-red-600/20 blur-xl rounded-full pointer-events-none"></div>
                     <div class="relative w-12 h-12 bg-gradient-to-br from-red-600 to-red-800 rounded-full flex items-center justify-center
@@ -466,7 +458,7 @@ new class extends Component
                     </div>
                 </div>
 
-                {{-- Live (Now accessible to everyone) --}}
+                {{-- Live --}}
                 <a href="{{ route('live') }}" wire:navigate
                    @click="activeTab = 'live'"
                    class="relative flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 transition-all duration-300 group w-16">

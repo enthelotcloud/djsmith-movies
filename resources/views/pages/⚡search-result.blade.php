@@ -51,33 +51,71 @@ class extends Component {
         return DB::table('moviecategories')->orderBy('name')->get();
     }
 
-    public function getMoviesProperty()
+    public function getContentProperty()
     {
-        $query = DB::table('movies')->where('status', 'ready');
+        // 1. Base Query for Movies
+        $moviesQuery = DB::table('movies')
+            ->select(
+                'movies.id',
+                'movies.title',
+                'movies.description',
+                DB::raw("COALESCE(movies.thumbnail, movies.thumbnail_path) as posterUrl"),
+                'movies.created_at',
+                'movies.slug',
+                DB::raw("'movie' as type")
+            )
+            ->where('movies.status', 'ready');
 
-        // Apply Search Filter
+        // Apply Search to Movies
         if (!empty(trim($this->q))) {
-            $query->where(function($q) {
-                $q->where('title', 'like', '%' . $this->q . '%')
-                  ->orWhere('description', 'like', '%' . $this->q . '%');
+            $moviesQuery->where(function($q) {
+                $q->where('movies.title', 'like', '%' . $this->q . '%')
+                  ->orWhere('movies.description', 'like', '%' . $this->q . '%');
             });
         }
 
-        // Apply Category Filter using Pivot Table
+        // Apply Category Filter
+        // (Since categories are explicitly for movies, we only show movies if a category is selected)
         if (!empty($this->category)) {
-            $query->join('category_movie', 'movies.id', '=', 'category_movie.movie_id')
-                  ->where('category_movie.moviecategory_id', $this->category);
+            $moviesQuery->join('category_movie', 'movies.id', '=', 'category_movie.movie_id')
+                        ->where('category_movie.moviecategory_id', $this->category);
+
+            $finalQuery = $moviesQuery->orderBy('movies.created_at', 'desc');
+        } else {
+            // 2. Base Query for Series (Only included if no specific movie category is selected)
+            $seriesQuery = DB::table('series')
+                ->select(
+                    'id',
+                    'title',
+                    'description',
+                    'poster as posterUrl',
+                    'created_at',
+                    'slug',
+                    DB::raw("'series' as type")
+                )
+                ->where('status', 'ready');
+
+            // Apply Search to Series
+            if (!empty(trim($this->q))) {
+                $seriesQuery->where(function($q) {
+                    $q->where('title', 'like', '%' . $this->q . '%')
+                      ->orWhere('description', 'like', '%' . $this->q . '%');
+                });
+            }
+
+            // Union Both Queries
+            $finalQuery = $moviesQuery->union($seriesQuery)->orderBy('created_at', 'desc');
         }
 
-        $movies = $query->orderBy('movies.created_at', 'desc')->paginate(20);
+        $content = $finalQuery->paginate(20);
 
         // Map safe Local Public Thumbnail URLs
-        $movies->getCollection()->transform(function ($movie) {
-            $movie->posterUrl = $this->getPosterUrl($movie->thumbnail ?? $movie->thumbnail_path ?? null);
-            return $movie;
+        $content->getCollection()->transform(function ($item) {
+            $item->posterUrl = $this->getPosterUrl($item->posterUrl);
+            return $item;
         });
 
-        return $movies;
+        return $content;
     }
 
     private function getPosterUrl($path)
@@ -92,26 +130,30 @@ class extends Component {
     }
 
     // ==========================================
-    // 🛡️ GATEKEEPERS (Stops the bandwidth drain)
+    // 🛡️ 100% HARD PAYWALL GATEKEEPERS
     // ==========================================
-    public function canWatch($movie)
+    public function canWatch()
     {
-        if (!$this->isLoggedIn) return false;
-        if ($movie->is_premium && !$this->hasActiveSub) return false;
-        return true;
+        // Zero free tier. You must be logged in AND have an active subscription.
+        return $this->isLoggedIn && $this->hasActiveSub;
     }
 
-    public function getMovieAction($movie)
+    public function getActionUrl($item)
     {
         if (!$this->isLoggedIn) {
             return route('login');
         }
 
-        if ($movie->is_premium && !$this->hasActiveSub) {
+        if (!$this->hasActiveSub) {
             return route('client.subscriptions');
         }
 
-        return route('client.player', ['slug' => $movie->slug]);
+        // Only generate the actual watch links if they are fully subscribed
+        if ($item->type === 'series') {
+            return route('client.series.show', ['slug' => $item->slug]);
+        }
+
+        return route('client.player', ['slug' => $item->slug]);
     }
 };
 ?>
@@ -173,7 +215,7 @@ class extends Component {
 
             {{-- RESULTS GRID --}}
             <div class="flex-1">
-                @if($this->movies->isEmpty())
+                @if($this->content->isEmpty())
                     <div class="py-20 text-center bg-[#111] rounded-2xl border border-slate-800">
                         <svg class="w-12 h-12 text-slate-600 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z"/></svg>
                         <h3 class="text-lg font-bold text-white">No content found</h3>
@@ -182,18 +224,19 @@ class extends Component {
                     </div>
                 @else
                     <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 sm:gap-6">
-                        @foreach($this->movies as $movie)
+                        @foreach($this->content as $item)
                             @php
-                                $canPlay = $this->canWatch($movie);
-                                $actionUrl = $this->getMovieAction($movie);
+                                $canPlay = $this->canWatch();
+                                $isLocked = !$canPlay;
+                                $actionUrl = $this->getActionUrl($item);
                             @endphp
 
                             <a href="{{ $actionUrl }}" wire:navigate class="group relative bg-[#111] rounded-2xl overflow-hidden border border-slate-800 hover:border-red-600/50 transition duration-500 shadow-lg block">
 
                                 {{-- Poster --}}
                                 <div class="aspect-[2/3] w-full relative overflow-hidden bg-zinc-900">
-                                    @if($movie->posterUrl)
-                                        <img src="{{ $movie->posterUrl }}" class="w-full h-full object-cover group-hover:scale-105 transition duration-700">
+                                    @if($item->posterUrl)
+                                        <img src="{{ $item->posterUrl }}" class="w-full h-full object-cover group-hover:scale-105 transition duration-700">
                                     @else
                                         <div class="w-full h-full flex items-center justify-center text-slate-700 text-xs font-bold uppercase">No Poster</div>
                                     @endif
@@ -201,11 +244,17 @@ class extends Component {
                                     <div class="absolute inset-0 bg-gradient-to-t from-black via-black/20 to-transparent opacity-80"></div>
 
                                     <div class="absolute top-2 left-2 flex flex-col gap-1.5 z-20">
-                                        @if($movie->type === 'series')
+                                        @if($item->type === 'series')
                                             <span class="px-2 py-0.5 bg-indigo-600 text-white text-[8px] font-black uppercase tracking-widest rounded shadow-md w-max">Series</span>
+                                        @else
+                                            <span class="px-2 py-0.5 bg-red-600 text-white text-[8px] font-black uppercase tracking-widest rounded shadow-md w-max">Movie</span>
                                         @endif
-                                        @if($movie->is_premium)
-                                            <span class="px-2 py-0.5 bg-amber-500 text-black text-[8px] font-black uppercase tracking-widest rounded shadow-md w-max">Premium</span>
+
+                                        @if($isLocked)
+                                            <span class="px-2 py-0.5 bg-amber-500 text-black text-[8px] font-black uppercase tracking-widest rounded shadow-md w-max flex items-center gap-1">
+                                                <svg class="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C9.243 2 7 4.243 7 7v3H6c-1.103 0-2 .897-2 2v8c0 1.103.897 2 2 2h12c1.103 0 2-.897 2-2v-8c0-1.103-.897-2-2-2h-1V7c0-2.757-2.243-5-5-5zm-3 5c0-1.654 1.346-3 3-3s3 1.346 3 3v3H9V7zm8 5v8H5v-8h14zM12 14c-1.104 0-2 .896-2 2s.896 2 2 2 2-.896 2-2-.896-2-2-2z"/></svg>
+                                                Locked
+                                            </span>
                                         @endif
                                     </div>
 
@@ -235,7 +284,7 @@ class extends Component {
 
                                 {{-- Details --}}
                                 <div class="p-3 sm:p-4 relative z-20">
-                                    <h3 class="text-xs sm:text-sm font-bold text-white truncate group-hover:text-red-500 transition">{{ $movie->title }}</h3>
+                                    <h3 class="text-xs sm:text-sm font-bold text-white truncate group-hover:text-red-500 transition">{{ $item->title }}</h3>
                                 </div>
                             </a>
                         @endforeach
@@ -243,7 +292,7 @@ class extends Component {
 
                     {{-- Native Livewire Pagination --}}
                     <div class="mt-12">
-                        {{ $this->movies->links(data: ['scrollTo' => false]) }}
+                        {{ $this->content->links(data: ['scrollTo' => false]) }}
                     </div>
                 @endif
             </div>

@@ -14,7 +14,7 @@ class extends Component
     public $episode;
     public $season;
     public $series;
-    public $nextEpisodeUrl = null; // Changed from Slug to exact URL
+    public $nextEpisodeUrl = null;
 
     public $streamUrl;
     public $thumbnailUrl = null;
@@ -31,7 +31,27 @@ class extends Component
 
         if (!$this->episode) abort(404);
 
-        // Fetch relationship metadata (Season & Series Info)
+        // 🛡️ 1. STRICT GUEST BLOCK: If not logged in, boot them to login immediately
+        if (!Auth::check()) {
+            return redirect()->route('login');
+        }
+
+        $user = Auth::user();
+
+        // 🛡️ 2. 100% HARD PAYWALL: Every user (except ID 1) MUST have an active, unexpired subscription
+        if ($user->id !== 1) {
+            $hasActiveSub = DB::table('subscriptions')
+                ->where('user_id', $user->id)
+                ->where('status', 'active')
+                ->where('expires_at', '>', now())
+                ->exists();
+
+            if (!$hasActiveSub) {
+                return redirect()->route('client.subscriptions');
+            }
+        }
+
+        // Fetch relationship metadata ONLY if they pass the paywall check to save DB load
         $seasonPivot = DB::table('episode_season')
             ->join('seasons', 'episode_season.season_id', '=', 'seasons.id')
             ->join('series', 'seasons.series_id', '=', 'series.id')
@@ -54,33 +74,21 @@ class extends Component
                 ->first();
 
             if ($nextEpisode) {
-                // Dynamically generate the exact URL based on whatever route name you are currently on
+                // Dynamically generate the exact URL
                 $this->nextEpisodeUrl = route(request()->route()->getName(), ['slug' => $nextEpisode->slug]);
             }
-        }
-
-        // Subscription Check
-        $user = Auth::user();
-        if ($this->episode->is_premium && ($user->id !== 1)) {
-            $hasSub = DB::table('subscriptions')->where('user_id', $user->id)->where('status', 'active')->exists();
-            if (!$hasSub) return redirect()->route('client.subscriptions');
         }
 
         $this->enforceSingleSession();
         $this->generateUrls();
 
-        // Fetch resume time
-        if (Auth::check()) {
-            $history = DB::table('episode_watch_histories')
-                ->where('user_id', Auth::id())
-                ->where('episode_id', $this->episode->id)
-                ->first();
+        // Fetch resume time (Guest cookie fallback removed)
+        $history = DB::table('episode_watch_histories')
+            ->where('user_id', $user->id)
+            ->where('episode_id', $this->episode->id)
+            ->first();
 
-            $this->startProgress = $history ? $history->progress_seconds : 0;
-        } else {
-            $cookieName = 'episode_progress_' . $this->episode->id;
-            $this->startProgress = request()->cookie($cookieName, 0);
-        }
+        $this->startProgress = $history ? $history->progress_seconds : 0;
     }
 
     public function enforceSingleSession()
@@ -138,7 +146,7 @@ class extends Component
                 ['user_id' => Auth::id(), 'episode_id' => $this->episode->id],
                 [
                     'progress_seconds' => $seconds,
-                    'is_completed' => ($this->episode->duration_in_seconds && $seconds >= ($this->episode->duration_in_seconds * 0.9)), // Mark complete if 90% watched
+                    'is_completed' => ($this->episode->duration_in_seconds && $seconds >= ($this->episode->duration_in_seconds * 0.9)),
                     'updated_at' => now(),
                     'created_at' => DB::raw('COALESCE(created_at, NOW())')
                 ]
@@ -183,17 +191,10 @@ class extends Component
                 let currentTime = Math.floor(video.currentTime);
                 let duration = Math.floor(video.duration);
 
-                // Save every 5 seconds
+                // Save every 5 seconds (Cookie logic removed since guests are blocked)
                 if (currentTime > 0 && currentTime % 5 === 0 && currentTime !== this.lastSavedTime) {
                     this.lastSavedTime = currentTime;
-
-                    @auth
-                        $wire.syncProgress(currentTime);
-                    @else
-                        let expiryDate = new Date();
-                        expiryDate.setDate(expiryDate.getDate() + 30);
-                        document.cookie = `episode_progress_${this.episodeId}=${currentTime}; expires=${expiryDate.toUTCString()}; path=/; SameSite=Strict`;
-                    @endauth
+                    $wire.syncProgress(currentTime);
                 }
 
                 // 🚨 AUTO-NEXT LOGIC (Trigger at 15 seconds remaining)
@@ -406,7 +407,7 @@ class extends Component
     {{-- Large Diagonal DRM Watermark Overlay --}}
     <div class="pointer-events-none absolute inset-0 z-[5] flex items-center justify-center overflow-hidden" style="user-select: none; -webkit-user-select: none;">
         <div class="text-[clamp(2rem,5vw,6rem)] font-black text-white/5 -rotate-[25deg] whitespace-nowrap tracking-[0.5em] select-none uppercase">
-            {{ Auth::user()->email ?? 'DJSMITH.CO.KE' }}
+            {{ Auth::user()->email }}
         </div>
     </div>
 
@@ -462,11 +463,8 @@ class extends Component
                     <span class="text-indigo-400 bg-indigo-400/10 px-2 py-1 rounded border border-indigo-400/20 uppercase tracking-widest">{{ $season->season_name }}</span>
                 @endif
 
-                @if($episode->is_premium)
-                    <span class="text-amber-400 bg-amber-400/10 px-2 py-1 rounded border border-amber-400/20 uppercase tracking-widest">Premium</span>
-                @else
-                    <span class="text-emerald-400 bg-emerald-400/10 px-2 py-1 rounded border border-emerald-400/20 uppercase tracking-widest">Free</span>
-                @endif
+                {{-- 🔒 100% Paywall Enforcement: Static Premium Badge --}}
+                <span class="text-amber-400 bg-amber-400/10 px-2 py-1 rounded border border-amber-400/20 uppercase tracking-widest">Premium</span>
 
                 @if($episode->duration_in_seconds)
                     <span>{{ floor($episode->duration_in_seconds / 60) }} MIN</span>
@@ -511,7 +509,7 @@ class extends Component
 
         {{-- Session Info Watermark --}}
         <div class="absolute bottom-6 right-6 sm:bottom-10 sm:right-10 opacity-20 select-none text-[10px] sm:text-xs tracking-widest font-bold pointer-events-none">
-            STREAMING ON DJSMITH.CO.KE • {{ Auth::user()->name ?? 'GUEST' }}
+            STREAMING ON DJSMITH.CO.KE • {{ Auth::user()->name }}
         </div>
     </div>
 
