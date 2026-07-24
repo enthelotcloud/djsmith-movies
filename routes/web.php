@@ -179,6 +179,7 @@ Route::prefix('admin')
     Route::livewire('/seasons', 'admin::seasons-manager')->name('seasons');
     Route::livewire('/series', 'admin::series-manager')->name('series');
     Route::livewire('/categories', 'admin::category-manager')->name('categories');
+    Route::livewire('/finance', 'admin::finance')->name('finance');
 });
 
 Route::prefix('client')

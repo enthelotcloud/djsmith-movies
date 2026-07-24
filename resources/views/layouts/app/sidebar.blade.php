@@ -49,6 +49,10 @@
                         {{ __('Categories') }}
                     </flux:sidebar.item>
 
+                    <flux:sidebar.item icon="banknotes" :href="route('admin.finance')" :current="request()->routeIs('admin.finance')" wire:navigate>
+                        {{ __('Finance') }}
+                    </flux:sidebar.item>
+
                 @endif
 
                 {{-- 💼 STAFF AREA --}}
