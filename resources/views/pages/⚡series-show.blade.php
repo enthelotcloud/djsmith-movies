@@ -12,6 +12,10 @@ new #[Layout('layouts.guest.app')] class extends Component {
     public $slug;
     public $series;
     public $activeSeasonId = null;
+    
+    // Paywall State
+    public $isLoggedIn = false;
+    public $hasActiveSub = false;
 
     public function mount($slug)
     {
@@ -26,6 +30,16 @@ new #[Layout('layouts.guest.app')] class extends Component {
         $firstSeason = $this->seasons->first();
         if ($firstSeason) {
             $this->activeSeasonId = $firstSeason->id;
+        }
+
+        // 🛡️ Paywall Check Initialization
+        $this->isLoggedIn = Auth::check();
+        if ($this->isLoggedIn) {
+            $this->hasActiveSub = DB::table('subscriptions')
+                ->where('user_id', Auth::id())
+                ->where('status', 'active')
+                ->where('expires_at', '>', now())
+                ->exists();
         }
     }
 
@@ -49,11 +63,22 @@ new #[Layout('layouts.guest.app')] class extends Component {
     {
         if (!$this->activeSeasonId) return [];
 
+        $userId = Auth::id() ?? 0;
+
         return DB::table('episodes')
             ->join('episode_season', 'episodes.id', '=', 'episode_season.episode_id')
+            // Left join watch history to track progress for the logged-in user
+            ->leftJoin('episode_watch_histories', function($join) use ($userId) {
+                $join->on('episodes.id', '=', 'episode_watch_histories.episode_id')
+                     ->where('episode_watch_histories.user_id', '=', $userId);
+            })
             ->where('episode_season.season_id', $this->activeSeasonId)
             ->where('episodes.status', 'ready')
-            ->select('episodes.*')
+            ->select(
+                'episodes.*', 
+                'episode_watch_histories.progress_seconds', 
+                'episode_watch_histories.is_completed'
+            )
             ->orderBy('episodes.id', 'asc')
             ->get();
     }
@@ -73,6 +98,20 @@ new #[Layout('layouts.guest.app')] class extends Component {
             return "{$hours}h {$minutes}m";
         }
         return "{$minutes}m";
+    }
+
+    // 🛡️ 100% Paywall Gatekeeper for Play Buttons
+    public function getActionUrl($episodeSlug)
+    {
+        if (!$this->isLoggedIn) {
+            return route('login');
+        }
+
+        if (!$this->hasActiveSub) {
+            return route('client.subscriptions');
+        }
+
+        return "/series/watch/" . $episodeSlug;
     }
 };
 ?>
@@ -165,12 +204,26 @@ new #[Layout('layouts.guest.app')] class extends Component {
             <div class="space-y-4">
                 @forelse($this->episodes as $index => $episode)
                     @php
-                        // Hardcoding the route path matching your player's Auto-Next logic
-                        $watchUrl = "/series/watch/" . $episode->slug;
+                        $watchUrl = $this->getActionUrl($episode->slug);
                         $epThumb = $episode->thumbnail ?? $series->poster ?? null;
+                        
+                        // Watch Progress Calculations
+                        $progressPercent = 0;
+                        $isWatched = false;
+                        if ($episode->duration_in_seconds > 0 && $episode->progress_seconds > 0) {
+                            $progressPercent = ($episode->progress_seconds / $episode->duration_in_seconds) * 100;
+                            $progressPercent = min(100, max(0, $progressPercent)); 
+                        }
+                        
+                        if ($episode->is_completed || $progressPercent > 90) {
+                            $isWatched = true;
+                        }
+
+                        $isLocked = !$this->isLoggedIn || !$this->hasActiveSub;
                     @endphp
 
-                    <div class="group relative flex flex-col sm:flex-row items-center gap-4 sm:gap-6 p-3 sm:p-4 bg-zinc-900/50 hover:bg-zinc-800/80 border border-slate-800 hover:border-slate-700 rounded-2xl transition-all duration-300">
+                    {{-- Apply dimming/grayscale to the card if it has been watched --}}
+                    <div class="group relative flex flex-col sm:flex-row items-center gap-4 sm:gap-6 p-3 sm:p-4 bg-zinc-900/50 hover:bg-zinc-800/80 border border-slate-800 hover:border-slate-700 rounded-2xl transition-all duration-300 {{ $isWatched ? 'opacity-60 grayscale-[40%]' : '' }}">
 
                         {{-- Episode Number --}}
                         <div class="hidden sm:flex items-center justify-center w-12 text-2xl font-black text-slate-700 group-hover:text-slate-400 transition-colors">
@@ -185,16 +238,32 @@ new #[Layout('layouts.guest.app')] class extends Component {
                                      alt="{{ $episode->title }}" loading="lazy">
                             @endif
 
-                            {{-- Play Icon Overlay --}}
-                            <a href="{{ $watchUrl }}" wire:navigate class="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity">
-                                <div class="w-12 h-12 rounded-full bg-red-600 flex items-center justify-center shadow-lg transform scale-90 group-hover:scale-100 transition-all">
-                                    <svg class="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 20 20"><path d="M4 4l12 6-12 6z"/></svg>
-                                </div>
-                            </a>
+                            {{-- Play Icon Overlay (Only show if not locked) --}}
+                            @if(!$isLocked)
+                                <a href="{{ $watchUrl }}" wire:navigate class="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+                                    <div class="w-12 h-12 rounded-full bg-red-600 flex items-center justify-center shadow-lg transform scale-90 group-hover:scale-100 transition-all">
+                                        <svg class="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 20 20"><path d="M4 4l12 6-12 6z"/></svg>
+                                    </div>
+                                </a>
+                            @endif
 
-                            {{-- Duration Badge --}}
+                            {{-- Lock Overlay for unsubscribed users --}}
+                            @if($isLocked)
+                                <div class="absolute inset-0 bg-black/60 flex items-center justify-center backdrop-blur-[1px] z-10">
+                                    <svg class="w-8 h-8 text-amber-500/80" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C9.243 2 7 4.243 7 7v3H6c-1.103 0-2 .897-2 2v8c0 1.103.897 2 2 2h12c1.103 0 2-.897 2-2v-8c0-1.103-.897-2-2-2h-1V7c0-2.757-2.243-5-5-5zm-3 5c0-1.654 1.346-3 3-3s3 1.346 3 3v3H9V7zm8 5v8H5v-8h14zM12 14c-1.104 0-2 .896-2 2s.896 2 2 2 2-.896 2-2-.896-2-2-2z"/></svg>
+                                </div>
+                            @endif
+
+                            {{-- Progress Bar (Redline at the bottom) --}}
+                            @if($progressPercent > 0)
+                                <div class="absolute bottom-0 left-0 right-0 h-1 bg-zinc-800 z-20">
+                                    <div class="h-full bg-red-600 shadow-[0_0_10px_rgba(220,38,38,0.8)]" style="width: {{ $progressPercent }}%;"></div>
+                                </div>
+                            @endif
+
+                            {{-- Duration Badge (Pushed up slightly if progress bar exists) --}}
                             @if($episode->duration_in_seconds)
-                                <div class="absolute bottom-2 right-2 px-1.5 py-0.5 bg-black/80 rounded text-[9px] font-bold text-white border border-white/10">
+                                <div class="absolute right-2 px-1.5 py-0.5 bg-black/80 rounded text-[9px] font-bold text-white border border-white/10 z-20 {{ $progressPercent > 0 ? 'bottom-2.5' : 'bottom-2' }}">
                                     {{ $this->formatDuration($episode->duration_in_seconds) }}
                                 </div>
                             @endif
@@ -207,9 +276,7 @@ new #[Layout('layouts.guest.app')] class extends Component {
                                     {{ $episode->title }}
                                 </h3>
 
-                                @if($episode->is_premium)
-                                    <span class="px-2 py-0.5 bg-amber-500 text-black text-[9px] font-black uppercase tracking-widest rounded shadow border border-amber-400 flex-shrink-0">Premium</span>
-                                @endif
+                                <span class="px-2 py-0.5 bg-amber-500 text-black text-[9px] font-black uppercase tracking-widest rounded shadow border border-amber-400 flex-shrink-0">Premium</span>
                             </div>
 
                             @if($episode->excerpt)
@@ -225,9 +292,15 @@ new #[Layout('layouts.guest.app')] class extends Component {
 
                         {{-- Action Area (Mobile shows as block, desktop shows on right) --}}
                         <div class="w-full sm:w-auto mt-2 sm:mt-0 flex-shrink-0">
-                            <a href="{{ $watchUrl }}" wire:navigate class="block w-full text-center px-6 py-3 rounded-xl bg-red-600/10 hover:bg-red-600 text-red-500 hover:text-white border border-red-500/20 hover:border-red-600 font-bold text-sm transition-all shadow-sm">
-                                Play
-                            </a>
+                            @if($isLocked)
+                                <a href="{{ $watchUrl }}" wire:navigate class="block w-full text-center px-6 py-3 rounded-xl bg-amber-500/10 hover:bg-amber-500 text-amber-500 hover:text-black border border-amber-500/30 hover:border-amber-500 font-bold text-sm transition-all shadow-sm">
+                                    Subscribe to Watch
+                                </a>
+                            @else
+                                <a href="{{ $watchUrl }}" wire:navigate class="block w-full text-center px-6 py-3 rounded-xl bg-red-600/10 hover:bg-red-600 text-red-500 hover:text-white border border-red-500/20 hover:border-red-600 font-bold text-sm transition-all shadow-sm">
+                                    {{ $progressPercent > 0 && !$isWatched ? 'Resume' : 'Play' }}
+                                </a>
+                            @endif
                         </div>
                     </div>
                 @empty
